@@ -1,0 +1,20 @@
+{
+  "name": "@buddy/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The wire Buddy uses: shared types, tool schemas and defaults for the host, the desktop shell, the phone and the web UI.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch --preserveWatchOutput"
+  }
+}

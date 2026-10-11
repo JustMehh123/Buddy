@@ -1,0 +1,22 @@
+{
+  "name": "@buddy/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Buddy's desktop shell — menu bar/tray app, the floating face and the cursor overlay he points with.",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "npm run build && electron .",
+    "start:no-build": "electron ."
+  },
+  "dependencies": {
+    "@buddy/core": "*",
+    "@buddy/protocol": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "electron": "^33.2.1",
+    "typescript": "^5.7.3"
+  }
+}

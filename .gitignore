@@ -1,0 +1,25 @@
+# deps
+node_modules/
+
+# build output
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# secrets — never commit your API keys
+.env
+.env.local
+.buddy/
+*.key
+
+# the phone server's local certificate (it is made again on demand)
+companion/.certs/
+
+# native
+ios/App/Pods/
+ios/App/build/
+ios/App/App/public/
+ios/DerivedData/
+*.xcuserdatad/
+.DS_Store
