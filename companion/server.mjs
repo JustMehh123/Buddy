@@ -48,8 +48,8 @@ const CERT_DIR = process.env.BUDDY_CERT_DIR || join(HERE, '.certs');
 const GEMINI_LIVE_WS =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_LIVE_MODEL = process.env.BUDDY_LIVE_MODEL || 'gemini-3.1-flash-live-preview';
-const DEFAULT_CHAT_MODEL = process.env.BUDDY_CHAT_MODEL || 'gemini-3.5-flash';
+const DEFAULT_LIVE_MODEL = process.env.BUDDY_LIVE_MODEL || 'gemini-3.8-live';
+const DEFAULT_CHAT_MODEL = process.env.BUDDY_CHAT_MODEL || 'gemini-3.8-flash';
 
 const log = (...args) => console.log(`\u001b[35mbuddy\u001b[0m`, ...args);
 const warn = (...args) => console.warn(`\u001b[33mbuddy\u001b[0m`, ...args);
@@ -428,15 +428,15 @@ const safeJson = (text) => {
   }
 };
 
-/** Accept a fresh Gemini token from the Mac; report anything we cannot speak. */
+/** Accept the token the Mac minted. */
 function normalizeLive(parsed) {
-  if (parsed.provider === 'openai' || parsed.clientSecret || parsed.value) return null;
   if (!parsed.token) return null;
   return {
     provider: 'gemini',
     token: parsed.token,
     wsUrl: parsed.wsUrl || GEMINI_LIVE_WS,
     model: parsed.model || DEFAULT_LIVE_MODEL,
+    fallbacks: Array.isArray(parsed.fallbacks) ? parsed.fallbacks : undefined,
     expiresAt: parsed.expiresAt || Date.now() + 30 * 60 * 1000,
     session: parsed.session || defaultSession(parsed.model || DEFAULT_LIVE_MODEL)
   };
@@ -503,8 +503,8 @@ async function chat(body) {
   const text = String(body.text || '').slice(0, 4000);
   if (!text) throw new Error('nothing to say');
 
-  // Preferred: let the Mac run it, so it uses his real instructions and his
-  // real tools (look, point, click…). A current Mac build answers `chat`.
+  // Preferred: let the Mac answer, so it uses his real instructions, his real
+  // tools and his own copy of the key. The Mac answers `chat`.
   const fromMac = await askMac({ command: 'chat', text }, 6000);
   if (fromMac?.text) return { text: fromMac.text, via: 'mac' };
 

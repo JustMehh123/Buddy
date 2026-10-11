@@ -57,9 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ⌃⌥S stops him using the computer right away.
         HotKeys.shared.register(keyCode: kVK_ANSI_S) { [weak self] in self?.stopActions() }
 
-        // First run with no key at all: ask for the free one, since that is all
-        // the phone app needs.
-        if Keychain.get(.gemini) == nil && Keychain.get(.openai) == nil {
+        // First run: ask for the free key, which is the only one he needs.
+        if Keychain.get(.gemini) == nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.editGeminiKey() }
         }
     }
@@ -207,13 +206,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func editGeminiKey() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Buddy's Voice Key (free)"
+        alert.messageText = "Buddy's Key (free)"
         alert.informativeText = """
-        Buddy talks with Google's Gemini, which has a free tier: no card, no billing.
+        Everything Buddy does — talking with you, looking at your screen, researching, taking meeting notes — \
+        runs on Google's Gemini, which has a free tier: no card, no billing, no other account.
 
         1. Open aistudio.google.com/apikey and sign in with a Google account.
         2. Create an API key and copy it.
-        3. Paste it here. It stays on this Mac — your phone only ever receives one-session tokens.
+        3. Paste it here. It stays on this Mac — your phone only ever receives short-lived, one-session tokens.
         """
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         field.placeholderString = Keychain.get(.gemini) == nil ? "AIza…" : "Key saved. Paste a new one to replace it."
@@ -230,22 +230,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard response == .alertFirstButtonReturn else { return }
         let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty { Keychain.set(.gemini, key) }
-    }
-
-    @objc private func editKeys() {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "OpenAI API Key (optional)"
-        alert.informativeText = "Only needed for OpenAI's own models and realtime voice — the free Gemini key covers the phone app. Saved privately on this Mac; the phone only ever gets short-lived keys."
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = Keychain.get(.openai) == nil ? "sk-…" : "Key saved. Paste a new one to replace it."
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty { Keychain.set(.openai, key) }
     }
 
     @objc private func setMood(_ item: NSMenuItem) {
@@ -318,7 +302,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Open Meeting Notes", #selector(openNotes)))
         menu.addItem(item("Personality…", #selector(editPersonality)))
         menu.addItem(item("Voice Key (free Gemini)…", #selector(editGeminiKey)))
-        menu.addItem(item("OpenAI Key (optional)…", #selector(editKeys)))
         menu.addItem(.separator())
 
         let trailMenu = NSMenu()

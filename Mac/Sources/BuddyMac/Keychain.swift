@@ -4,13 +4,9 @@ import Foundation
 /// never in the project folder or git. Unlike the Keychain, this never asks for your password.
 enum Keychain {
     enum Key: String {
-        /// The free path: a Google AI Studio key powers his voice, on the phone
-        /// and in the app. Everything works with just this one.
+        /// The free path, and the only key Buddy needs: Google AI Studio powers
+        /// his voice, his answers, his research and his transcription.
         case gemini
-        /// Optional. Only needed for OpenAI's own models and realtime voice.
-        case openai
-        case anthropic
-        case elevenlabs
     }
 
     private static var cache: [String: String]?

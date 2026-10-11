@@ -19,6 +19,19 @@
 const AUDIO_IN_HZ = 16000;
 const AUDIO_OUT_HZ = 24000;
 
+/**
+ * Google renames its live models every few months. If the one the computer
+ * named cannot be reached, the next of these is tried instead of leaving the
+ * user staring at a silent face.
+ */
+const LIVE_MODEL_FALLBACKS = ['gemini-3.8-live', 'gemini-3.1-flash-live-preview', 'gemini-2.5-flash-native-audio-preview-12-2025'];
+
+const modelChain = (preferred, alsoTry = []) => {
+  const wanted = preferred || LIVE_MODEL_FALLBACKS[0];
+  const others = [...alsoTry, ...LIVE_MODEL_FALLBACKS].filter((model) => model && model !== wanted);
+  return [wanted, ...new Set(others)];
+};
+
 export class LiveVoice {
   /**
    * @param {object} options
@@ -48,6 +61,9 @@ export class LiveVoice {
     this.userBuffer = '';
     this.buddyBuffer = '';
     this.toolChain = Promise.resolve();
+    this.connecting = false;
+    this.setupDone = false;
+    this.pendingSetup = null;
     this.lastGoAway = 0;
     this.openedAt = 0;
   }
@@ -66,50 +82,83 @@ export class LiveVoice {
     this.options.onStatus?.('connecting');
     await this.prepareAudio();
 
-    const url = `${config.wsUrl}?access_token=${encodeURIComponent(config.token)}`;
-    await new Promise((resolve, reject) => {
+    let lastError = null;
+    this.connecting = true;
+    try {
+      for (const model of modelChain(config.session?.model || config.model, config.fallbacks)) {
+        try {
+          this.config = { ...config, model };
+          await this.openSocket();
+          this.startAmbient();
+          this.options.onStatus?.('ready');
+          return;
+        } catch (error) {
+          lastError = error;
+          this.dropSocket();
+          console.warn(`Buddy: the voice model ${model} did not answer (${error.message})`);
+        }
+      }
+    } finally {
+      this.connecting = false;
+    }
+    throw lastError || new Error('No voice model answered.');
+  }
+
+  /**
+   * One attempt at the socket. It counts as connected once the service has
+   * acknowledged the session with `setupComplete` — an open socket that never
+   * answers is a failed attempt, not a working conversation.
+   */
+  openSocket() {
+    const url = `${this.config.wsUrl}?access_token=${encodeURIComponent(this.config.token)}`;
+    return new Promise((resolve, reject) => {
       let settled = false;
       const socket = new WebSocket(url);
       this.socket = socket;
+      this.setupDone = false;
+
       const fail = (error) => {
         if (settled) return;
         settled = true;
+        this.pendingSetup = null;
         reject(error instanceof Error ? error : new Error(String(error)));
       };
+      const ready = () => {
+        if (settled) return;
+        settled = true;
+        this.pendingSetup = null;
+        resolve();
+      };
+      this.pendingSetup = { fail, ready };
 
-      const timeout = setTimeout(() => fail(new Error('The voice connection timed out.')), 12000);
+      const timeout = setTimeout(() => fail(new Error('The voice session did not start in time.')), 12000);
 
       socket.onopen = () => {
-        clearTimeout(timeout);
         this.connected = true;
         this.openedAt = Date.now();
-        this.sendSetup(config);
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
+        this.sendSetup(this.config);
       };
       socket.onmessage = (event) => this.handleMessage(event.data);
       socket.onerror = () => fail(new Error('Could not reach the voice service.'));
       socket.onclose = (event) => {
         clearTimeout(timeout);
-        const wasConnected = this.connected;
         this.connected = false;
-        this.options.onStatus?.('closed', event.reason || `code ${event.code}`);
-        if (!wasConnected) fail(new Error(event.reason || 'The voice service closed the connection.'));
+        // While trying models in turn, a closed socket is just a failed
+        // attempt: no need to tell the page the session ended.
+        if (!this.connecting) this.options.onStatus?.('closed', event.reason || `code ${event.code}`);
+        if (!this.setupDone) fail(new Error(event.reason || 'The voice session closed before it started.'));
         else this.options.onClose?.();
       };
     });
-
-    this.startAmbient();
-    this.options.onStatus?.('ready');
   }
 
   /** The `setup` message: who he is, what he can do, and how he should sound. */
   sendSetup(config) {
     const session = config.session || {};
     const setup = {
-      model: `models/${session.model || config.model || 'gemini-3.1-flash-live-preview'}`,
+      // config.model is the model this attempt is for; it already defaults to
+      // whatever the session asked for on the first try.
+      model: `models/${config.model || session.model || LIVE_MODEL_FALLBACKS[0]}`,
       generationConfig: {
         responseModalities: ['AUDIO'],
         temperature: typeof session.temperature === 'number' ? session.temperature : 0.85,
@@ -142,19 +191,21 @@ export class LiveVoice {
       };
     }
 
-    this.send(setup);
+    this.send({ setup });
   }
 
-  /** Swap personality or tools mid-session (settings changed). */
+  /**
+   * His personality and voice are fixed when the session starts, so changing
+   * them means a fresh session. The caller reconnects on `onClose`.
+   */
   updateSession({ instructions, voice } = {}) {
-    if (instructions) this.send({ systemInstruction: { parts: [{ text: instructions }] } });
-    if (voice) {
-      this.send({
-        generationConfig: {
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: normaliseVoice(voice) } } }
-        }
-      });
-    }
+    const session = this.config?.session;
+    if (!session || (!instructions && !voice)) return false;
+    if (instructions) session.instructions = instructions;
+    if (voice) session.voice = normaliseVoice(voice);
+    this.options.onStatus?.('reconnect', 'New settings — starting a fresh voice session.');
+    this.options.onClose?.();
+    return true;
   }
 
   setPushToTalk(on) {
@@ -228,11 +279,31 @@ export class LiveVoice {
 
   /** Hand an id back once a tool has finished, then let him speak about it. */
   sendToolResponse(id, name, response) {
+    // A look at the screen comes back as a picture with the tool result. Gemini's
+    // function responses are JSON only, so the picture goes in the other way:
+    // as a single still frame of live camera input, just before the answer.
+    const { image, ...rest } = response || {};
+    if (typeof image === 'string' && image.length > 0) {
+      this.send({
+        realtimeInput: { video: { data: image, mimeType: image.startsWith('/9j/') ? 'image/jpeg' : 'image/png' } }
+      });
+    }
     this.send({
       toolResponse: {
-        functionResponses: [{ id, name, response: { result: response } }]
+        functionResponses: [{ id, name, response: { result: rest } }]
       }
     });
+  }
+
+  /** Between one model attempt and the next: the socket goes, the mic stays. */
+  dropSocket() {
+    try {
+      this.socket?.close();
+    } catch {
+      /* already gone */
+    }
+    this.socket = null;
+    this.connected = false;
   }
 
   close() {
@@ -409,6 +480,8 @@ export class LiveVoice {
     }
 
     if (message.setupComplete) {
+      this.setupDone = true;
+      this.pendingSetup?.ready();
       this.options.onStatus?.('ready');
       return;
     }
@@ -480,7 +553,11 @@ export class LiveVoice {
     }
 
     if (message.error) {
-      this.options.onError?.(message.error.message || 'The voice service reported an error.');
+      const why = message.error.message || 'The voice service reported an error.';
+      // Before the session starts, this is a failed attempt: the next model gets
+      // a turn. Afterwards it is worth telling the user about.
+      if (!this.setupDone) this.pendingSetup?.fail(new Error(why));
+      else this.options.onError?.(why);
     }
   }
 
@@ -497,7 +574,7 @@ export class LiveVoice {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/** Gemini's JSON-Schema dialect rejects a couple of keywords OpenAI accepts. */
+/** Gemini's JSON-Schema dialect is strict: keep only what it accepts. */
 export const toFunctionDeclaration = (tool) => {
   const parameters = sanitise(tool.parameters || { type: 'object', properties: {} });
   return {

@@ -7,7 +7,7 @@ build/
 out/
 *.tsbuildinfo
 
-# secrets — never commit your OpenAI key
+# secrets — never commit your API keys
 .env
 .env.local
 .buddy/

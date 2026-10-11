@@ -53,6 +53,12 @@ final class Settings {
         set { defaults.set(newValue.rawValue, forKey: "trail"); onChange?() }
     }
 
+    /// Which of Gemini's voices he speaks with. The phone shows this too.
+    var voice: String {
+        get { defaults.string(forKey: "voice") ?? "Puck" }
+        set { defaults.set(newValue, forKey: "voice"); onChange?() }
+    }
+
     /// The mood picked by hand in the menu.
     var mood: Mood {
         get { Mood(rawValue: defaults.string(forKey: "mood") ?? "") ?? .listening }

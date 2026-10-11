@@ -252,7 +252,7 @@ function handlePacket(packet) {
     const pending = state.pendingTools.get(packet.callID);
     if (pending) {
       state.pendingTools.delete(packet.callID);
-      pending({ ok: true, text: packet.text || '', image: packet.image ? true : undefined });
+      pending({ ok: true, text: packet.text || '', image: packet.image || undefined });
     }
   }
 }

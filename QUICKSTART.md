@@ -111,8 +111,16 @@ your browser. Good for checking the phone side before the rest is set up.
 | A new Wi-Fi or a new IP | `node companion/server.mjs --regen-certs`, then reinstall the profile on the phone. |
 | Port already in use | He takes the next free port and prints it — just use the address he shows. |
 
-A note on his two voices: on the **phone** he talks through Gemini's realtime
-voice with the free key. On the **Mac** (⌥Space), the wake-and-talk loop still
-uses OpenAI's realtime API, so that one asks for an OpenAI key; everything the
-phone drives — looking at your screen, pointing, clicking, typing — works from
-the free key alone.
+### What runs where
+
+| Piece | Who does the thinking |
+| --- | --- |
+| Talking with him (hold the screen) | Gemini Live, on the free key — the phone only ever gets a short-lived, one-session token |
+| Looking at your screen, pointing, clicking, typing | The Mac runs the tools; Gemini decides which to use |
+| Research | Gemini with Google Search grounding — the report card lists the pages it used |
+| Meeting notes | Gemini listens to each recorded chunk and writes the speaker-labelled transcript |
+
+One key covers all of it. It is stored in
+`~/Library/Application Support/Buddy/keys.json` (readable only by you) and never
+leaves the Mac: the phone gets a token that is good for one session and expires
+on its own.

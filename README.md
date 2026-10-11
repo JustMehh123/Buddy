@@ -24,7 +24,7 @@ once, is enough for everything.
 
 | Piece | What it is | Where |
 | --- | --- | --- |
-| **Buddy.app** | A Mac menu-bar app. He holds the API key, reads the screen, points, clicks, types, takes notes, and draws his own cursor. | `Mac/`, `Shared/`, `Package.swift` |
+| **Buddy.app** | A Mac menu-bar app. He holds the Gemini key, reads the screen, points, clicks, types, takes notes, and draws his own cursor. | `Mac/`, `Shared/`, `Package.swift` |
 | **The phone app** | A website. Same face, same push-to-talk, installs to your home screen with Share → Add to Home Screen. | `Web/` |
 | **The bridge** | A tiny Node server that serves the website and finds your Mac on the Wi-Fi, because browsers can't speak Bonjour or raw sockets. | `companion/` |
 
@@ -71,6 +71,8 @@ Just want to see him? `./start.sh --demo` — no Mac, no key, just his face.
   sources.
 - **Meeting notes** — long recordings are transcribed with speakers and saved to
   `~/Documents/Buddy Notes/`.
+- **Talk with him** — hold the screen and he answers out loud, or in a bubble if
+  you would rather keep the room quiet.
 
 ## The free API, honestly
 
@@ -82,9 +84,10 @@ There is no such thing as a literally unlimited free API. What there is:
 | **Groq** (optional) | ~1,000 requests/day, ~7,200 audio-seconds/hour on Whisper | Add a key if you want separate fast "ears" for transcription. |
 | **Ollama** (optional) | Runs on your own Mac, no internet, no quota | The only truly unlimited option, because it is your own hardware. |
 
-So: free is generous enough for real daily use, and the moment you need more, an
-OpenAI or paid Gemini key can be added without changing anything else — the Mac
-app already knows how to hold those too.
+So: free is generous enough for real daily use. Everything in Buddy — his voice,
+his answers, his research, his meeting notes — runs on that one free key. If you
+ever outgrow it, swapping in a paid key is a one-line change in
+`Mac/Sources/BuddyMac/Gemini.swift`, with nothing else to rewire.
 
 ## Troubleshooting
 
@@ -100,6 +103,8 @@ app already knows how to hold those too.
 - **Port already in use** — he moves to the next free port and prints it.
 - **He talks with a phone voice** — that is the fallback when the realtime voice
   cannot be reached, almost always a missing or rejected key.
+- **"Gemini wouldn't answer"** — the key was rejected. Check it at
+  aistudio.google.com/apikey, then paste it again under **Voice Key (free Gemini)…**.
 
 ## Repository layout
 

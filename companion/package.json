@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.mjs",
     "demo": "BUDDY_DEMO=1 node server.mjs",
-    "smoke": "node tools/page-smoke.mjs"
+    "smoke": "node tools/page-smoke.mjs && node tools/voice-path.mjs",
+    "voice": "node tools/voice-path.mjs"
   },
   "engines": {
     "node": ">=20"

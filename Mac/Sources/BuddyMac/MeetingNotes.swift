@@ -3,8 +3,6 @@ import Foundation
 /// Turns recorded audio into a proper transcript (with speaker labels) and keeps each session's
 /// meeting notes as plain files any agent can read: ~/Documents/Buddy Notes/<date> <id>/.
 enum MeetingNotes {
-    static let model = "gpt-4o-transcribe-diarize"
-    static let fallbackModel = "gpt-transcribe"
 
     static var root: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -42,11 +40,11 @@ enum MeetingNotes {
         let text = """
         # Buddy Notes
 
-        Meeting notes recorded by Riley's Buddy app (the blueberry on the iPhone). One folder per listening \
-        session, named by start time.
+        Meeting notes recorded by Buddy (the blueberry on your phone). One folder per listening session, \
+        named by start time.
 
         In each session folder:
-        - `notes.md`: the full transcript with timestamps and speaker labels, plus Riley's questions to Buddy, \
+        - `notes.md`: the full transcript with timestamps and speaker labels, plus the user's questions to Buddy, \
         Buddy's replies and any research reports, in time order. Start here.
         - `session.json`: the same data, structured.
         - `audio/`: the raw recording, as five-minute AAC chunks.
@@ -66,21 +64,45 @@ enum MeetingNotes {
         let audioURL = folder.appendingPathComponent("audio", isDirectory: true)
         try? FileManager.default.createDirectory(at: audioURL, withIntermediateDirectories: true)
         try audio.write(to: audioURL.appendingPathComponent(String(format: "chunk-%03d.m4a", index)))
-        do {
-            return (try await diarized(audio), folder)
-        } catch {
-            NSLog("Buddy: diarized transcription failed (\(error)), trying \(fallbackModel)")
-            return (try await plain(audio), folder)
-        }
+        return (try await turns(audio), folder)
     }
 
-    private static func diarized(_ audio: Data) async throws -> [Segment] {
-        let json = try await post(audio, fields: ["model": model, "response_format": "diarized_json", "chunking_strategy": "auto"])
-        let raw = (json["segments"] as? [[String: Any]] ?? []).map {
-            Segment(speaker: $0["speaker"] as? String ?? "?", start: $0["start"] as? Double ?? 0,
-                    end: $0["end"] as? Double ?? 0, text: ($0["text"] as? String ?? "").trimmingCharacters(in: .whitespaces))
+    /// Gemini listens to the recording and hands back speaker-labelled turns.
+    /// If it can't manage that (a very noisy recording, say), the same audio is
+    /// asked for as plain text, so a session always ends up with something.
+    private static func turns(_ audio: Data) async throws -> [Segment] {
+        do {
+            let rows = try await Gemini.transcribe(audio)
+            let raw = rows.map {
+                Segment(speaker: $0["speaker"] as? String ?? "?",
+                        start: ($0["start"] as? Double) ?? Double($0["start"] as? Int ?? 0),
+                        end: ($0["end"] as? Double) ?? Double($0["end"] as? Int ?? 0),
+                        text: ($0["text"] as? String ?? "").trimmingCharacters(in: .whitespaces))
+            }
+            let joined = join(raw)
+            if !joined.isEmpty { return joined }
+        } catch {
+            NSLog("Buddy: transcription failed (\(error)), trying without speakers")
         }
-        // Join one speaker's consecutive pieces into a single turn.
+        let json = try await Gemini.generate(
+            model: Gemini.transcribeModel,
+            body: [
+                "contents": [[
+                    "role": "user",
+                    "parts": [
+                        ["text": "Write out everything said in this recording, as one block of plain text. No labels, no timestamps."],
+                        ["inlineData": ["mimeType": "audio/mp4", "data": audio.base64EncodedString()]],
+                    ]
+                ]],
+                "generationConfig": ["temperature": 0.2]
+            ]
+        )
+        let text = (Gemini.text(in: json) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? [] : [Segment(speaker: "?", start: 0, end: 0, text: text)]
+    }
+
+    /// Joins one speaker's consecutive pieces into a single turn.
+    private static func join(_ raw: [Segment]) -> [Segment] {
         var turns: [Segment] = []
         for segment in raw where !segment.text.isEmpty {
             if var last = turns.last, last.speaker == segment.speaker, segment.start - last.end < 2.5 {
@@ -92,35 +114,6 @@ enum MeetingNotes {
             }
         }
         return turns
-    }
-
-    private static func plain(_ audio: Data) async throws -> [Segment] {
-        let json = try await post(audio, fields: ["model": fallbackModel, "response_format": "json"])
-        let text = (json["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? [] : [Segment(speaker: "?", start: 0, end: 0, text: text)]
-    }
-
-    private static func post(_ audio: Data, fields: [String: String]) async throws -> [String: Any] {
-        guard let key = Keychain.get(.openai) else { throw RealtimeHost.TokenError.noKey }
-        let boundary = "buddy-\(UUID().uuidString)"
-        var body = Data()
-        for (name, value) in fields {
-            body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".data(using: .utf8)!)
-        }
-        body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chunk.m4a\"\r\nContent-Type: audio/mp4\r\n\r\n".data(using: .utf8)!)
-        body.append(audio)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 300
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await URLSession.shared.upload(for: request, from: body)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200, let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw RealtimeHost.TokenError.failed("transcription \(code) " + (String(data: data, encoding: .utf8) ?? ""))
-        }
-        return json
     }
 
     // MARK: Notes files
@@ -157,7 +150,7 @@ enum MeetingNotes {
         }
         if pending > 0 { out.append("\(pending) recording chunk(s) still being transcribed; this file updates when they're done.") }
         let asked = entries.filter { $0["kind"] as? String == "asked" }.count
-        if asked > 0 { out.append("Riley asked Buddy \(asked) question(s); they're marked inline below.") }
+        if asked > 0 { out.append("Buddy was asked \(asked) question(s); they're marked inline below.") }
         out += ["", "## Transcript", ""]
 
         for entry in entries {
@@ -170,7 +163,7 @@ enum MeetingNotes {
             case "heard":
                 out.append("[\(time)] (live) \(text)")
             case "asked":
-                out.append("> **[\(time)] Riley asked Buddy:** \(text)")
+                out.append("> **[\(time)] Asked Buddy:** \(text)")
             case "reply":
                 out.append("> **Buddy:** \(text)")
             case "report":

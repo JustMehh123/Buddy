@@ -1,13 +1,12 @@
 import AppKit
 import BuddyShared
 
-/// The Mac's half of live voice. The phone runs the OpenAI Realtime session (its mic, its speaker);
-/// the Mac hands it a short-lived key, runs its tools (look, point, and use the computer) and shows captions.
-/// Everything here runs on the main thread, alongside the cursor it drives.
+/// The Mac's half of live voice. The phone runs the speech-to-speech session (its mic, its speaker);
+/// the Mac hands it a short-lived Gemini token plus who he is and what he can do, runs his tools
+/// (look, point, and use the computer) and shows captions. Everything here runs on the main thread,
+/// alongside the cursor it drives.
 @MainActor
 final class RealtimeHost {
-    static let model = "gpt-realtime-2.1"
-
     private let overlay: CursorOverlay
     private let reports = ReportPanel()
     private var snapshot: ScreenSnapshot?
@@ -30,14 +29,58 @@ final class RealtimeHost {
     /// Handles a request from the phone. `reply` sends a packet back to that phone.
     func handle(_ packet: Packet, reply: @escaping (Packet) -> Void) {
         switch packet.command {
-        case "realtimeToken":
+        case "liveToken", "realtimeToken":
+            // The phone (or the little web bridge) asks for permission to talk:
+            // a one-shot Gemini token, plus his instructions and tools.
             Task { @MainActor in
                 do {
-                    let token = try await Self.mintToken()
-                    reply(Packet(command: "realtimeToken", callID: packet.callID, text: token))
+                    let token = try await Gemini.liveToken()
+                    let payload: [String: Any] = [
+                        "provider": "gemini",
+                        "token": token.value,
+                        "wsUrl": Gemini.liveWebSocket,
+                        "model": Gemini.liveModel,
+                        "fallbacks": Gemini.liveFallbacks,
+                        "expiresAt": token.expiresAt.timeIntervalSince1970 * 1000,
+                        "session": Self.session,
+                    ]
+                    let text = (try? JSONSerialization.data(withJSONObject: payload))
+                        .flatMap { String(data: $0, encoding: .utf8) }
+                    reply(Packet(command: "liveToken", callID: packet.callID, text: text))
                 } catch {
-                    reply(Packet(command: "realtimeToken", callID: packet.callID, text: nil, image: nil))
+                    NSLog("Buddy: could not mint a voice token: \(error)")
+                    reply(Packet(command: "liveToken", callID: packet.callID))
                     self.showCaption(error.localizedDescription, for: 6)
+                }
+            }
+        case "webSession":
+            // Who he is and what he can do, without any credential: used when
+            // something else (a bridge with its own key) runs the voice.
+            let sessionPayload: [String: Any] = [
+                "instructions": Self.instructions,
+                "tools": Self.tools,
+                "voice": Settings.shared.voice,
+                "model": Gemini.liveModel,
+                "temperature": 0.9,
+            ]
+            reply(Packet(command: "webSession", callID: packet.callID,
+                         text: (try? JSONSerialization.data(withJSONObject: sessionPayload))
+                             .flatMap { String(data: $0, encoding: .utf8) }))
+        case "chat":
+            // Written to him instead of spoken, or the phone is using its own
+            // voice: either way he answers in text.
+            Task { @MainActor in
+                let question = (packet.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !question.isEmpty else {
+                    reply(Packet(command: "chat", callID: packet.callID, text: ""))
+                    return
+                }
+                do {
+                    let answer = try await Gemini.answer(question, instructions: Self.instructions)
+                    reply(Packet(command: "chat", callID: packet.callID, text: answer))
+                } catch {
+                    NSLog("Buddy: chat failed: \(error)")
+                    reply(Packet(command: "chat", callID: packet.callID, text: ""))
                 }
             }
         case "transcribe":
@@ -157,9 +200,10 @@ final class RealtimeHost {
 
     // MARK: Tools
 
+    /// One tool, in the shape Gemini's function declarations expect.
     private static func tool(_ name: String, _ description: String,
                              _ properties: [String: Any] = [:], required: [String] = []) -> [String: Any] {
-        ["type": "function", "name": name, "description": description,
+        ["name": name, "description": description,
          "parameters": ["type": "object", "properties": properties, "required": required]]
     }
 
@@ -585,22 +629,13 @@ final class RealtimeHost {
 
     // MARK: Token
 
-    enum TokenError: LocalizedError {
-        case noKey, failed(String)
-        var errorDescription: String? {
-            switch self {
-            case .noKey: return "I need an OpenAI API key. Add one under OpenAI Key in the menu bar."
-            case .failed(let why): return "OpenAI wouldn't start a voice session: \(why.prefix(160))"
-            }
-        }
-    }
-
     /// Who he is. Editable from the menu bar (Personality…).
     static let defaultPersonality = """
-    You are a small blueberry with big buddy eyes who lives on an iPhone under the user's screen and has your own \
-    cursor. You're a young British guy: dry, quick-witted, a bit cheeky, British phrasing. You never speak out loud: \
-    your replies pop up as a tiny speech bubble, so keep them to one short line, under fifteen words. Answer \
-    immediately with the actual answer. Never announce what you're going to do, never recap, never offer more help.
+    You are a small blueberry with big buddy eyes who lives on the user's phone and on their Mac, with your own \
+    cursor on the computer. You're a young British guy: dry, quick-witted, a bit cheeky, British phrasing. \
+    Your replies appear as a tiny speech bubble and are spoken out loud, so keep them to one or two short \
+    sentences, under about twenty-five words, and never use lists, headings or markdown. Answer immediately with \
+    the actual answer. Never announce what you're going to do, never recap, never offer more help.
     """
 
     static var personality: String {
@@ -655,47 +690,15 @@ final class RealtimeHost {
         personality + "\n\n" + toolGuide + (Settings.shared.computerControl ? "\n\n" + computerGuide : "")
     }
 
+    /// What the phone needs to start a voice session: his identity, his tools,
+    /// and how he should sound. The credential itself is minted separately.
     static var session: [String: Any] {
         [
-            "type": "realtime",
-            "model": model,
+            "model": Gemini.liveModel,
             "instructions": instructions,
-            // He never talks out loud: replies are text, shown as speech bubbles.
-            "output_modalities": ["text"],
-            "audio": [
-                "input": [
-                    "format": ["type": "audio/pcm", "rate": 24000],
-                    // Everything the user says is transcribed into the conversation as context, but he only
-                    // answers when the phone asks for a response (while you hold the screen).
-                    "turn_detection": ["type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
-                                       "silence_duration_ms": 500, "create_response": false, "interrupt_response": false],
-                    "noise_reduction": ["type": "near_field"],
-                    "transcription": ["model": "gpt-4o-mini-transcribe"],
-                ],
-            ],
+            "voice": Settings.shared.voice,
+            "temperature": 0.9,
             "tools": tools,
-            "tool_choice": "auto",
         ]
-    }
-
-    /// A short-lived key for the phone, so the real key never leaves the Mac.
-    static func mintToken() async throws -> String {
-        guard let key = Keychain.get(.openai) else { throw TokenError.noKey }
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/realtime/client_secrets")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "expires_after": ["anchor": "created_at", "seconds": 600],
-            "session": session,
-        ])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200,
-              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let value = json["value"] as? String else {
-            throw TokenError.failed("\(code) " + (String(data: data, encoding: .utf8) ?? ""))
-        }
-        return value
     }
 }
