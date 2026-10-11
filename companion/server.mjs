@@ -206,8 +206,23 @@ function handleMacPacket(packet) {
 async function discoverMac() {
   if (DEMO || FORCED_HOST) return;
 
+  let Bonjour;
   try {
-    const { Bonjour } = await import('bonjour-service');
+    ({ Bonjour } = await import('bonjour-service'));
+  } catch {
+    // Run straight from a fresh clone and the one dependency is missing. Fetch
+    // it here rather than making the first run end in a stack trace.
+    warn('installing the one small dependency (bonjour-service) — a few seconds, once');
+    try {
+      execFileSync('npm', ['install', '--no-audit', '--no-fund', '--silent'], { cwd: HERE, stdio: 'inherit' });
+      ({ Bonjour } = await import('bonjour-service'));
+    } catch (error) {
+      warn(`could not install it (${error.message}); set BUDDY_HOST and BUDDY_PORT instead`);
+      return;
+    }
+  }
+
+  try {
     const bonjour = new Bonjour();
     const browser = bonjour.find({ type: SERVICE_TYPE });
     browser.on('up', (service) => {
@@ -733,7 +748,15 @@ function openStream(request, response) {
   if (mac.lastFace) sse(response, { face: mac.lastFace });
   sse(response, { hello: mac.name });
   sse(response, { command: mac.connected ? 'webConnected' : 'webDisconnected' });
-  sse(response, { command: 'settings', text: JSON.stringify({ secure: Boolean(certificates), host: mac.name }) });
+  sse(response, {
+    command: 'settings',
+    text: JSON.stringify({
+      secure: Boolean(certificates),
+      host: mac.name,
+      demo: DEMO,
+      hasKey: Boolean(geminiKey())
+    })
+  });
 
   // A comment every 20 seconds keeps proxies and sleepy phones from dropping it.
   const keepAlive = setInterval(() => {
@@ -753,7 +776,7 @@ function openStream(request, response) {
   response.on('close', done);
 }
 
-function installPage(response) {
+function installPage(response, over = 'https', appUrl = '/') {
   const body = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -776,14 +799,15 @@ function installPage(response) {
   <p>iOS only lets a web page use the microphone when the connection is trusted. Install this
      certificate profile once and the microphone, the home-screen app and everything else work.</p>
   <a class="install" href="/buddy-ca.mobileconfig">Install the Buddy certificate</a>
-  <h2>Then</h2>
+  <h2>Then, on this phone</h2>
   <ol>
     <li>Tap <strong>Allow</strong> when Safari says it downloaded a profile.</li>
     <li>Open <strong>Settings → General → VPN &amp; Device Management</strong> and tap <strong>Buddy</strong> → Install.</li>
     <li>Open <strong>Settings → General → About → Certificate Trust Settings</strong> and turn on full trust for <strong>Buddy Local CA</strong>.</li>
-    <li>Come back to Buddy, reload, and tap <strong>Share → Add to Home Screen</strong> to keep him around.</li>
+    <li>Come back here and tap <strong>Open Buddy</strong> below — then <strong>Share → Add to Home Screen</strong> so he stays.</li>
   </ol>
-  <p>You can remove it any time in the same Settings screens — nothing leaves your Wi-Fi.</p>
+  <a class="install" id="open" href="${appUrl}">Open Buddy</a>
+  <p>You can remove the profile any time in the same Settings screens. Nothing leaves your Wi-Fi.</p>
 </body></html>`;
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
   response.end(body);
@@ -824,31 +848,123 @@ function serveStatic(pathname, response) {
 
 // ────────────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, '0.0.0.0', () => {
-  const scheme = certificates ? 'https' : 'http';
-  const short = hostname().replace(/\.local$/i, '');
-  const lines = [
-    `Buddy's phone app is served at:`,
-    '',
-    `   ${scheme}://${short}.local:${PORT}/`,
-    ...addresses().map((entry) => `   ${scheme}://${entry.address}:${PORT}/`),
-    '',
-    DEMO
-      ? 'Demo mode is ON: no Mac needed, he does faces and answers from a script.'
-      : 'Open that on your phone (same Wi-Fi), then Share → Add to Home Screen.',
-    'It finds your Mac on its own when the Buddy app is running.'
-  ];
-  if (certificates) {
-    lines.push(
-      '',
-      'Microphone on iPhone needs one-time trust:',
-      `   open ${scheme}://${short}.local:${PORT}/install on the phone and follow the two steps.`
-    );
-  } else {
-    lines.push('', 'Plain HTTP: the face and buttons work; iPhone will not give a web page the microphone.');
+/** A scannable way onto the phone, printed in the terminal. */
+async function printQRCode(url) {
+  try {
+    const { default: QRCode } = await import('qrcode');
+    const art = await QRCode.toString(url, { type: 'terminal', small: true, margin: 1 });
+    console.log(`\u001b[35m${art.replace(/^/gm, '   ')}\u001b[0m`);
+    console.log("\u001b[35m   Scan that with the phone's camera.\u001b[0m\n");
+  } catch {
+    /* without the qrcode package the address above is plenty */
   }
-  console.log(`\n\u001b[35m${lines.join('\n')}\u001b[0m\n`);
-  if (FORCED_HOST) connectToMac(FORCED_HOST, FORCED_PORT || 8737);
-  else discoverMac();
-  if (DEMO) startDemo();
-});
+}
+
+/**
+ * Listen, and if the port is taken, take the next one. "Seamless" cannot mean
+ * "crashes with EADDRINUSE the second time you run it".
+ */
+function listen(instance, port, attempts = 12) {
+  return new Promise((resolve, reject) => {
+    let candidate = port;
+    let left = attempts;
+    let listening = false;
+
+    const onListening = () => {
+      listening = true;
+      // Trust the server itself, never our own bookkeeping: a leftover callback
+      // from an earlier attempt would otherwise report the port that failed.
+      resolve(instance.address().port);
+    };
+    // Stays attached on purpose: an unhandled 'error' event would take the
+    // whole bridge down and, with it, the phone's connection.
+    const onError = (error) => {
+      if (listening) {
+        warn(`server error: ${error.message}`);
+        return;
+      }
+      if (error.code === 'EADDRINUSE' && left > 0) {
+        left -= 1;
+        candidate += 1;
+        warn(`port ${candidate - 1} is busy — trying ${candidate}`);
+        setImmediate(() => instance.listen(candidate, '0.0.0.0'));
+        return;
+      }
+      instance.removeListener('listening', onListening);
+      reject(error);
+    };
+
+    instance.on('error', onError);
+    instance.once('listening', onListening);
+    instance.listen(candidate, '0.0.0.0');
+  });
+}
+
+/**
+ * A small plain-HTTP server on the next port, always there.
+ *
+ * Two jobs: iOS refuses to fetch a certificate profile over a connection that
+ * the certificate itself is supposed to protect (chicken and egg), so the phone
+ * needs one insecure address to download it from; and if the HTTPS address is
+ * awkward to reach, this one still shows his face.
+ */
+function startCompanionServer(httpsPort) {
+  const companion = createServer((request, response) => {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    if (url.pathname === '/buddy-ca.mobileconfig' || url.pathname === '/buddy.mobileconfig') {
+      if (!certificates) return json(response, 404, { error: 'no certificate' });
+      const body = readFileSync(join(CERT_DIR, 'buddy-ca.mobileconfig'));
+      response.writeHead(200, { 'content-type': MIME['.mobileconfig'], 'content-length': body.length });
+      return response.end(body);
+    }
+    if (url.pathname === '/install') {
+      const host = (request.headers.host || '').split(':')[0];
+      return installPage(response, 'http', `https://${host}:${httpsPort}/`);
+    }
+    // Everything else belongs on the trusted address.
+    const host = (request.headers.host || '').split(':')[0];
+    response.writeHead(302, { location: `https://${host}:${httpsPort}${url.pathname}${url.search}` });
+    response.end();
+  });
+  return listen(companion, httpsPort + 1, 4).catch(() => null);
+}
+
+const port = await listen(server, PORT);
+const scheme = certificates ? 'https' : 'http';
+const short = hostname().replace(/\.local$/i, '');
+const link = `${scheme}://${short}.local:${port}/`;
+const companionPort = certificates ? await startCompanionServer(port) : null;
+
+const lines = ["Buddy's phone app is ready:"];
+if (companionPort) {
+  const setup = `http://${short}.local:${companionPort}/install`;
+  lines.push(
+    '',
+    `   1. On the phone (same Wi-Fi), open:   ${setup}`,
+    '      That page installs the little certificate he needs, then turns on his microphone.',
+    `   2. Then add him to the home screen:   ${link}`
+  );
+  await printQRCode(setup);
+} else {
+  lines.push('', `   Open this on your phone (same Wi-Fi):   ${link}`, '   Then Share -> Add to Home Screen.');
+  await printQRCode(link);
+}
+if (DEMO) lines.push('', 'Demo mode is ON: no Mac needed, he does faces and answers from a script.');
+else lines.push('', 'He finds your Mac on his own when the Buddy app is running.');
+if (!certificates) lines.push('', 'Plain HTTP: the face and buttons work; iPhone will not give a web page the microphone.');
+
+console.log(`\n\u001b[35m${lines.join('\n')}\u001b[0m\n`);
+
+// Show him off on this machine too (localhost counts as a trusted address, so
+// the microphone works there as well). --no-open keeps him out of the way.
+if (process.platform === 'darwin' && !process.argv.includes('--no-open')) {
+  try {
+    execFileSync('open', [`${scheme}://localhost:${port}/`], { stdio: 'ignore' });
+  } catch {
+    /* nothing to open with; the addresses above are enough */
+  }
+}
+
+if (FORCED_HOST) connectToMac(FORCED_HOST, FORCED_PORT || 8737);
+else discoverMac();
+if (DEMO) startDemo();

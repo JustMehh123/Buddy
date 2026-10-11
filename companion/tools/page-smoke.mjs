@@ -169,7 +169,16 @@ note(requests.some((request) => request.url.includes('/api/session')), 'it asked
 note($('#status-dot').dataset.kind === 'ready', `the status dot reads "${$('#status-dot').dataset.kind}"`);
 note($('#status').textContent.length > 0, `the status line reads "${$('#status').textContent}"`);
 
+// A brand-new visitor gets greeted once, using what the computer told us.
 stream.message({ hello: 'Test Mac' });
+stream.message({ command: 'settings', text: JSON.stringify({ secure: true, host: 'Test Mac', demo: false, hasKey: true }) });
+await sleep(60);
+note($('#bubble').classList.contains('visible'), 'a first-time visitor gets a welcome bubble');
+note(/Hold the screen/.test($('#bubble-text').textContent), `the welcome explains the gesture ("${$('#bubble-text').textContent.slice(0, 40)}…")`);
+const greeted = window.localStorage.getItem('buddy.greeted');
+stream.message({ command: 'settings', text: JSON.stringify({ secure: true, host: 'Test Mac', demo: false, hasKey: true }) });
+note(Boolean(greeted), 'the greeting is remembered so it happens only once');
+
 stream.message({ face: { mood: 'thinking', gazeX: 0.4, gazeY: -0.2, talk: 0 } });
 stream.message({ command: 'caption', text: 'Looking at your screen…' });
 stream.message({ command: 'captionDone', text: 'Looking at your screen…' });

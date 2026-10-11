@@ -55,6 +55,7 @@ const state = {
   handsFree: false,
   bubbleTimer: null,
   recording: false,
+  holding: false,
   lastTap: 0,
   sound: null
 };
@@ -236,8 +237,10 @@ function handlePacket(packet) {
   if (packet.command === 'testVoice') chirp('up');
   if (packet.command === 'settings' && packet.text) {
     try {
-      state.settings = { ...(state.settings || {}), ...JSON.parse(packet.text) };
+      const incoming = JSON.parse(packet.text);
+      state.settings = { ...(state.settings || {}), ...incoming };
       applySettingsToUi();
+      firstRunGreeting(incoming);
     } catch {
       /* ignore */
     }
@@ -251,6 +254,27 @@ function handlePacket(packet) {
       state.pendingTools.delete(packet.callID);
       pending({ ok: true, text: packet.text || '', image: packet.image ? true : undefined });
     }
+  }
+}
+
+/**
+ * The very first time someone opens him, he says hello and tells them what to
+ * do — or, if something is still missing, exactly what that is. Once per
+ * browser: after that it would just be noise.
+ */
+function firstRunGreeting(info = {}) {
+  try {
+    if (localStorage.getItem('buddy.greeted')) return;
+    localStorage.setItem('buddy.greeted', '1');
+  } catch {
+    return; // no storage (private mode): better to stay quiet than to repeat
+  }
+  if (info.demo) {
+    showBubble("I'm Buddy. This is demo mode — hook up your computer and I can really see your screen and do things.");
+  } else if (info.hasKey === false) {
+    showBubble("I'm Buddy, but I haven't got a voice key yet. Open my menu in your Mac's menu bar and choose “Voice Key (free Gemini)…”.");
+  } else {
+    showBubble("Hi, I'm Buddy. Hold the screen and talk to me — let go and I'll answer.");
   }
 }
 
@@ -388,6 +412,7 @@ async function startRealtime(live) {
     });
     state.live = voice;
     voice.setVoiceOut(state.voiceOut);
+    if (state.holding) voice.beginHold();
   } catch (error) {
     state.live = null;
     throw error;
@@ -467,6 +492,8 @@ function startLocalVoice() {
       /* already listening */
     }
   };
+  // Woken up mid-press: don't make them lift and press again.
+  if (state.holding) state.localWake();
 }
 
 async function askLocally(text) {
@@ -516,6 +543,7 @@ function bindGestures() {
   const down = (event) => {
     if (event.target.closest('.no-hold')) return;
     holdStarted = Date.now();
+    state.holding = true;
 
     if (state.handsFree) return;
     if (!state.awake) wake();
@@ -530,6 +558,7 @@ function bindGestures() {
   };
 
   const up = () => {
+    state.holding = false;
     if (state.handsFree) return;
     const held = Date.now() - holdStarted;
     if (held < 220) return; // too short to be a question
@@ -663,6 +692,13 @@ function boot() {
   setStatus('connecting', 'Looking for your computer…');
   face.setMood('sleepy');
   connectToMac();
+
+  // Keep the shell cached so tapping his icon shows his face immediately, even
+  // before the computer answers. (Browsers only allow this on trusted
+  // addresses, which is the same condition the microphone has.)
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('./sw.js').catch(() => undefined);
+  }
 
   els.settingsClose.addEventListener('click', () => els.settings.classList.remove('visible'));
   document.getElementById('gear').addEventListener('click', (event) => {

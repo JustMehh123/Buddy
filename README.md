@@ -35,57 +35,26 @@ then everything works.
 
 ## Quick start
 
-### 1. Get a free key
-
-Visit **[aistudio.google.com/apikey](https://aistudio.google.com/apikey)**, sign in
-with any Google account, and create an API key. No card, no billing, no ChatGPT.
-
-### 2. Run the Mac app
-
 ```sh
-./scripts/build-mac.sh      # needs the Xcode Command Line Tools
-open build/Buddy.app
+./start.sh
 ```
 
-Buddy appears in the menu bar and asks for his voice key on first run — paste the
-one you just made (or use **Voice Key (free Gemini)…** in his menu any time). He
-keeps it in `~/Library/Application Support/Buddy/keys.json`, readable only by you.
+That builds and opens `Buddy.app`, starts the little phone server, and prints a
+QR code. Then, **once**:
 
-### 3. Run the bridge
+1. **Get a free key** at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+   (any Google account, no card) and paste it when Buddy asks.
+2. **Scan the QR code** with your phone's camera — the Mac and the phone must be
+   on the same Wi-Fi.
+3. On the page that opens, tap **Install the Buddy certificate**, then do the two
+   quick steps it shows in **Settings** (profile → install, then full trust).
+   This is what lets a web page use the microphone; it never leaves your Wi-Fi.
+4. Tap **Open Buddy**, then **Share → Add to Home Screen**.
 
-```sh
-cd companion && npm install && cd ..
-node companion/server.mjs
-```
+Hold the screen and talk; let go and he answers. Double tap to send him to sleep.
 
-It prints something like:
-
-```
-   https://your-mac.local:8443/
-```
-
-### 4. Put him on your phone
-
-1. Open that address on your phone (same Wi-Fi).
-2. The first time, open `https://your-mac.local:8443/install` and follow the two
-   steps to trust the certificate — this is the only fiddly bit, and it is what
-   lets the microphone work.
-3. Then Share → **Add to Home Screen**. He opens full-screen, like an app.
-
-### 5. Use him
-
-- **Hold the screen and talk.** Let go and he answers.
-- **Double tap** to wake him up or put him to sleep.
-- **Gear** for details: which computer, which voice, whether he may use the
-  computer, and a switch for him speaking out loud.
-- On the Mac: **⌥Space** wakes him, **⌃⌥P** points here, **⌃⌥F** makes his eyes
-  follow your mouse, **⌃⌥D** stops pointing, **⌃⌥S** stops him using the computer.
-
-Just want to see him before setting anything up?
-
-```sh
-BUDDY_DEMO=1 node companion/server.mjs
-```
+Step by step with screenshots-in-words: **[QUICKSTART.md](QUICKSTART.md)**.
+Just want to see him? `./start.sh --demo` — no Mac, no key, just his face.
 
 ## What he can do
 
@@ -119,20 +88,18 @@ app already knows how to hold those too.
 
 ## Troubleshooting
 
-- **"Looking for your computer…"** — the bridge hasn't found `Buddy.app`. Check
-  the Mac app is running (its menu-bar icon stops looking faded), and that the
-  phone and Mac are on the same Wi-Fi. If your network blocks Bonjour, start the
-  bridge with `BUDDY_HOST=your-mac.local BUDDY_PORT=<port>`.
-- **"The microphone needs a trusted connection"** — open `/install` on the phone
-  and do the two steps (install the profile, then turn on full trust in
-  Settings → General → About → Certificate Trust Settings).
-- **A different Wi-Fi or a new IP** — the certificate covers the addresses it saw
-  when it was made. Re-run `node companion/server.mjs --regen-certs` and reinstall
-  the profile.
-- **"No voice provider is available"** — no key yet. Use the Mac app's
-  **Voice Key (free Gemini)…** menu item, or start the bridge with
-  `GEMINI_API_KEY=…`.
-- **Port already in use** — `BUDDY_PHONE_PORT=9443 node companion/server.mjs`.
+- **"Looking for your computer…"** — the phone server has not found `Buddy.app`.
+  Check the blueberry is in the menu bar and both devices are on the same Wi-Fi.
+  If your network blocks Bonjour: `BUDDY_HOST=your-mac.local BUDDY_PORT=8737 ./start.sh`.
+- **"The microphone needs a trusted connection"** — the certificate steps in
+  QUICKSTART step 3 were not finished.
+- **"No voice provider is available"** — no key yet. **Voice Key (free Gemini)…**
+  in his menu, or `GEMINI_API_KEY=… ./start.sh`.
+- **A new Wi-Fi or IP** — `node companion/server.mjs --regen-certs`, then
+  reinstall the profile on the phone.
+- **Port already in use** — he moves to the next free port and prints it.
+- **He talks with a phone voice** — that is the fallback when the realtime voice
+  cannot be reached, almost always a missing or rejected key.
 
 ## Repository layout
 
