@@ -339,6 +339,17 @@ body {
   border-bottom: 1px solid var(--line);
   font-size: 0.88rem;
 }
+#settings-body .link {
+  background: none;
+  border: none;
+  padding: 0 0 0 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--berry1);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 #settings-body .label {
   color: var(--ink-soft);
   flex: none;

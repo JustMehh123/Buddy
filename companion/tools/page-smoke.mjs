@@ -47,7 +47,8 @@ for (const method of [
 // ── The fake browser ────────────────────────────────────────────────────────
 
 const html = readFileSync(join(WEB, 'index.html'), 'utf8');
-const dom = new JSDOM(html, { url: 'https://buddy.test/', pretendToBeVisual: true });
+const PAIRING_SECRET = 'a'.repeat(64);
+const dom = new JSDOM(html, { url: `https://buddy.test/?pair=${PAIRING_SECRET}`, pretendToBeVisual: true });
 const { window } = dom;
 
 window.HTMLCanvasElement.prototype.getContext = function getContext() {
@@ -86,10 +87,54 @@ const session = {
   settings: { name: 'Buddy', voice: 'Puck', computerUse: true, chime: true },
   host: { name: 'Test Mac' }
 };
+
+/** Tokens the page has been handed, so a single-use one cannot be offered twice. */
+const minted = [];
+const reply = (status, body) => ({ ok: status < 400, status, json: async () => body });
+
 window.fetch = async (url, options = {}) => {
-  requests.push({ url: String(url), body: options.body ? JSON.parse(options.body) : null });
-  const body = String(url).includes('api/session') ? session : { text: 'From the computer.' };
-  return { ok: true, status: 200, json: async () => body };
+  const path = String(url);
+  const headers = options.headers || {};
+  const entry = {
+    url: path,
+    body: options.body ? JSON.parse(options.body) : null,
+    auth: headers.authorization || headers.Authorization || '',
+    method: options.method || 'GET'
+  };
+  requests.push(entry);
+
+  // Pairing is the one endpoint that answers without a device token.
+  if (path.includes('api/pair')) {
+    if (entry.body?.secret !== PAIRING_SECRET) return reply(401, { error: 'wrong code' });
+    return reply(200, { token: 'device-token-1', device: { id: 'd_test', name: 'iPhone' } });
+  }
+
+  // Everything else wants the token the page got from pairing.
+  if (entry.auth !== 'Bearer device-token-1') {
+    return reply(401, { error: 'This device is not paired with the computer yet.', hint: 'Open the setup link.' });
+  }
+
+  if (path.includes('api/session')) {
+    const model = entry.body?.model || 'gemini-3.8-live';
+    const token = `one-shot-${minted.length + 1}`;
+    minted.push(token);
+    return reply(200, {
+      ...session,
+      live: {
+        provider: 'gemini',
+        token,
+        wsUrl: 'wss://example/…BidiGenerateContentConstrained',
+        model,
+        constrained: true,
+        newSessionExpiresAt: Date.now() + 150000,
+        setup: { model: `models/${model}`, generationConfig: { responseModalities: ['AUDIO'] } }
+      }
+    });
+  }
+  if (path.includes('api/info')) {
+    return reply(200, { host: { name: 'Test Mac' }, settings: session.settings, demo: false, hasKey: true });
+  }
+  return reply(200, { text: 'From the computer.' });
 };
 
 window.AudioContext = class {
@@ -155,9 +200,19 @@ console.log('Buddy phone page — smoke test\n');
 await import(join(WEB, 'app.js'));
 await sleep(80);
 
+// ── Pairing: the link the QR code carries is traded for a device token ─────
+const pairCall = requests.find((request) => request.url.includes('api/pair'));
+note(Boolean(pairCall), 'the page traded the link\'s pairing code with the computer');
+note(pairCall?.body?.secret === PAIRING_SECRET, 'it sent the code it arrived with');
+note(window.localStorage.getItem('buddy.token') === 'device-token-1', 'the device token is kept for next time');
+note(!window.location.search.includes('pair='), `the spent code is gone from the address (${window.location.search || 'no query'})`);
+note(requests.every((request) => request.url.includes('api/pair') || request.auth === 'Bearer device-token-1'),
+  'everything after pairing carries the device token');
+
 const stream = FakeEventSource.last;
 note(Boolean(stream), 'the page opened its event stream');
 note(Boolean(stream?.url.includes('/api/events')), 'the stream points at /api/events');
+note(Boolean(stream?.url.includes('token=device-token-1')), 'the stream carries the device token too');
 
 stream.open();
 await sleep(80);
@@ -165,7 +220,9 @@ await sleep(80);
 const posted = () => requests.filter((request) => request.url.includes('/api/send')).map((request) => request.body);
 note(posted().some((packet) => packet?.hello), 'it introduced itself with a hello packet');
 note(posted().some((packet) => packet?.command === 'webClient'), 'it told the computer it is the web client');
-note(requests.some((request) => request.url.includes('/api/session')), 'it asked for a voice session');
+note(!requests.some((request) => request.url.includes('/api/session')),
+  'loading the page does not spend a voice credential');
+note(requests.some((request) => request.url.includes('/api/info')), 'it asked what the computer knows about him instead');
 note($('#status-dot').dataset.kind === 'ready', `the status dot reads "${$('#status-dot').dataset.kind}"`);
 note($('#status').textContent.length > 0, `the status line reads "${$('#status').textContent}"`);
 
@@ -191,6 +248,9 @@ const surface = window.document.getElementById('surface');
 surface.dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
 await sleep(320);
 note(posted().some((packet) => packet?.command === 'awake'), 'holding the screen wakes him up');
+const sessionCalls = requests.filter((request) => request.url.includes('/api/session'));
+note(sessionCalls.length === 1, `waking asks for exactly one voice credential (${sessionCalls.length})`);
+note(minted.length === 1, `and it is a fresh one (${minted[0] || 'none'})`);
 window.dispatchEvent(new window.Event('pointerup', { bubbles: true }));
 await sleep(60);
 

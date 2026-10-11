@@ -234,55 +234,199 @@ note(socket.events('toolResponse').length === 2, 'the second tool gets its own r
 
 voice.close();
 
-// ── A model Google has retired must not leave him mute ──────────────────────
+// ── Credentials: fresh for every attempt, never a used one ──────────────────
+//
+// A voice credential is single-use *and* only good for starting a session for
+// about a minute. So the two ways to get this wrong are: fetching it when the
+// page loads (dead by the time anyone presses the screen), and offering the
+// same one again after an attempt failed. Both are pinned down here.
 
-let attempts = 0;
-class RetiredModelSocket extends FakeSocket {
+console.log('\nCredentials\n');
+
+const WS = 'wss://example/…BidiGenerateContentConstrained';
+
+/** Sockets that behave as the script says, one entry per attempt. */
+class ScriptedSocket extends FakeSocket {
+  static script = [];
+  static tokens = [];
+  static index = 0;
   constructor(url) {
     super(url);
-    attempts += 1;
-    this.attempt = attempts;
-    this.acknowledges = false;
+    this.attemptIndex = ScriptedSocket.index;
+    ScriptedSocket.index += 1;
+    this.mode = ScriptedSocket.script[this.attemptIndex] || 'ok';
+    ScriptedSocket.tokens.push(new URL(url).searchParams.get('access_token'));
   }
   send(raw) {
-    // Recorded like the real thing, but the first attempt is turned away
-    // before the session is ever acknowledged — a retired model.
     const payload = JSON.parse(raw);
     this.sent.push(payload);
     if (!payload.setup) return;
-    if (this.attempt === 1) setTimeout(() => this.onclose?.({ code: 1007, reason: 'model not found' }), 5);
+    if (this.mode === 'refuse') setTimeout(() => this.onclose?.({ code: 1007, reason: 'model not found' }), 3);
+    else if (this.mode === 'auth') setTimeout(() => this.onclose?.({ code: 1008, reason: 'API key not valid' }), 3);
+    else if (this.mode === 'silent') return; // never acknowledged
     else setTimeout(() => this.deliver({ setupComplete: {} }), 2);
   }
 }
 
-const socketFor = globalThis.WebSocket;
-globalThis.WebSocket = RetiredModelSocket;
-attempts = 0;
-const socketsBefore = FakeSocket.all.length;
-const retryVoice = new LiveVoice({ onTool: async () => ({ ok: true, text: '' }), onStatus: () => undefined });
-const firstModel = 'gemini-2.0-gone';
-try {
-  await retryVoice.connect({
-    token: 't2',
-    wsUrl: 'wss://example/…',
-    session: { model: firstModel, instructions: 'x', voice: 'Puck', tools: [] },
+const withScripted = async (script, run) => {
+  const socketFor = globalThis.WebSocket;
+  globalThis.WebSocket = ScriptedSocket;
+  ScriptedSocket.script = script;
+  ScriptedSocket.tokens = [];
+  ScriptedSocket.index = 0;
+  try {
+    return await run();
+  } finally {
+    globalThis.WebSocket = socketFor;
+  }
+};
+
+/** A minter that hands out tokens the way the bridge does: one per attempt. */
+const freshMinter = (mints) => async (model) => {
+  mints.push(model);
+  return {
+    live: {
+      provider: 'gemini',
+      token: `fresh-${mints.length}`,
+      wsUrl: WS,
+      model,
+      constrained: true,
+      newSessionExpiresAt: Date.now() + 150000,
+      setup: { model: `models/${model}`, generationConfig: { responseModalities: ['AUDIO'] }, pinned: true }
+    }
+  };
+};
+
+// (a) The first model is refused: the fallback connects, with its own token.
+const mintsA = [];
+await withScripted(['refuse', 'ok'], async () => {
+  const voice = new LiveVoice({ onTool: async () => ({ ok: true }), onStatus: () => undefined });
+  await voice.connect({
+    wsUrl: WS,
+    session: { model: 'gemini-2.0-gone', instructions: 'x', voice: 'Puck', tools: [] },
+    mint: freshMinter(mintsA),
     pushToTalk: true,
     voiceOut: false
   });
-} catch {
-  /* if every model fails that is a real error, asserted below */
-}
-const retried = FakeSocket.last; // the newest socket created
-note(attempts >= 2, `a retired model is retried rather than given up on (${attempts} attempts)`);
-const sentModels = FakeSocket.all.slice(socketsBefore)
-  .map((socket) => socket.sent.find((payload) => payload.setup)?.setup?.model)
-  .filter(Boolean);
-note(sentModels[0] === `models/${firstModel}`, `the named model is tried first (${sentModels[0]})`);
-note(sentModels[1] && sentModels[1] !== `models/${firstModel}`, `then a known-good one (${sentModels[1]})`);
-note(retryVoice.connected, 'the session ends up connected');
-note(Boolean(retryVoice.micNode), 'the microphone survived the retry');
-retryVoice.close();
-globalThis.WebSocket = socketFor;
+  note(mintsA.length === 2, `each attempt minted its own credential (${mintsA.length})`);
+  note(mintsA[0] === 'gemini-2.0-gone', `the first credential was for the named model (${mintsA[0]})`);
+  note(Boolean(mintsA[1]) && mintsA[1] !== mintsA[0], `the second was for a different model (${mintsA[1]})`);
+  note(ScriptedSocket.tokens[0] === 'fresh-1' && ScriptedSocket.tokens[1] === 'fresh-2',
+    'the second attempt used a new token, never the spent one');
+  const secondSetup = ScriptedSocket.all.filter((s) => s instanceof ScriptedSocket)[1]?.sent.find((p) => p.setup)?.setup;
+  note(secondSetup?.pinned === true, 'the constrained session sent back is the one the token was pinned to');
+
+  // (e) The session drops while in use: the page is told, and the next
+  //     connection mints again rather than replaying the dead credential.
+  let closed = false;
+  voice.options.onClose = () => {
+    closed = true;
+  };
+  voice.socket.onclose?.({ code: 1011, reason: 'internal error' });
+  note(closed, 'a drop after setup is reported, so the page can reconnect');
+  const before = mintsA.length;
+  await withScripted(['ok'], async () => {
+    const again = new LiveVoice({ onTool: async () => ({ ok: true }), onStatus: () => undefined });
+    await again.connect({
+      wsUrl: WS,
+      session: { model: 'gemini-3.8-live', instructions: 'x', voice: 'Puck', tools: [] },
+      mint: freshMinter(mintsA),
+      pushToTalk: true,
+      voiceOut: false
+    });
+    again.close();
+  });
+  note(mintsA.length === before + 1, 'recovering from a drop mints a fresh credential');
+});
+
+// (b) A credential whose window has already passed never opens a socket.
+await withScripted(['ok'], async () => {
+  const socketsBefore = FakeSocket.all.length;
+  const voice = new LiveVoice({ onStatus: () => undefined });
+  let failure = null;
+  try {
+    await voice.connect({
+      token: 'stale',
+      wsUrl: WS,
+      session: { model: 'gemini-3.8-live', instructions: 'x', voice: 'Puck', tools: [] },
+      newSessionExpiresAt: Date.now() - 1000,
+      pushToTalk: true,
+      voiceOut: false
+    });
+  } catch (error) {
+    failure = error;
+  }
+  note(Boolean(failure) && /expired/i.test(failure.message), `an expired credential is refused up front (${failure?.message})`);
+  note(FakeSocket.all.length === socketsBefore, 'and nothing is opened with it');
+  voice.close();
+});
+
+// (c) A credential the service turns away is explained, then retried fresh.
+await withScripted(['auth', 'auth', 'auth'], async () => {
+  const mintsC = [];
+  const voice = new LiveVoice({ onStatus: () => undefined, onError: () => undefined });
+  let failure = null;
+  try {
+    await voice.connect({
+      wsUrl: WS,
+      session: { model: 'gemini-3.8-live', instructions: 'x', voice: 'Puck', tools: [] },
+      mint: freshMinter(mintsC),
+      pushToTalk: true,
+      voiceOut: false
+    });
+  } catch (error) {
+    failure = error;
+  }
+  note(mintsC.length === 3, `a rejected credential is retried with a new one, boundedly (${mintsC.length})`);
+  note(Boolean(failure) && /credential/i.test(failure.message),
+    `and the reason says the credential was refused (${failure?.message})`);
+  voice.close();
+});
+
+// (d) Every model failing is one clear error, not a retry storm.
+await withScripted(['refuse', 'refuse', 'refuse', 'refuse'], async () => {
+  const mintsD = [];
+  const voice = new LiveVoice({ onStatus: () => undefined });
+  let failure = null;
+  try {
+    await voice.connect({
+      wsUrl: WS,
+      session: { model: 'gemini-1.0-ancient', instructions: 'x', voice: 'Puck', tools: [] },
+      mint: freshMinter(mintsD),
+      pushToTalk: true,
+      voiceOut: false
+    });
+  } catch (error) {
+    failure = error;
+  }
+  note(Boolean(failure), 'when every model fails the page is told');
+  note(mintsD.length === 4, `one credential per model in the chain, no more (${mintsD.length})`);
+  voice.close();
+});
+
+// (f) Without a minter, a single-use credential is offered exactly once.
+await withScripted(['refuse', 'ok', 'ok'], async () => {
+  const socketsBefore = FakeSocket.all.length;
+  const voice = new LiveVoice({ onStatus: () => undefined });
+  let failure = null;
+  try {
+    await voice.connect({
+      token: 'one-shot',
+      wsUrl: WS,
+      session: { model: 'gemini-2.0-gone', instructions: 'x', voice: 'Puck', tools: [] },
+      newSessionExpiresAt: Date.now() + 150000,
+      pushToTalk: true,
+      voiceOut: false
+    });
+  } catch (error) {
+    failure = error;
+  }
+  const used = FakeSocket.all.slice(socketsBefore);
+  note(used.length === 1, `a single-use token is never offered twice (${used.length} socket(s))`);
+  note(Boolean(failure) && /single-use/i.test(failure.message),
+    `and the reason says why (${failure?.message})`);
+  voice.close();
+});
 
 console.log(`\n${problems.length === 0 ? 'all good' : `${problems.length} problem(s)`}`);
 for (const problem of problems) console.log(` - ${problem}`);

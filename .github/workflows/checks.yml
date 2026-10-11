@@ -1,0 +1,39 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The two halves of Buddy, checked separately because they need different
+# machines: the bridge is a Node program, the app is a Swift one.
+#
+# Nothing here needs a secret. There is no API key in this repository and none
+# should ever be added: the tests that talk to Gemini use a local stand-in, and
+# the ones that would need a real key are meant to be run by hand on the user's
+# own Mac (see "Checking it yourself" in QUICKSTART.md).
+
+jobs:
+  bridge:
+    name: bridge (node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: companion/package-lock.json
+      - run: npm --prefix companion ci
+      - name: Phone page, voice path, bridge security, voice credentials
+        run: npm --prefix companion run smoke
+
+  mac:
+    name: mac app (swift)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: What is building this
+        run: swift --version
+      - name: Build the menu bar app
+        run: swift build -c release --product BuddyMac

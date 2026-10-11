@@ -23,3 +23,4 @@ ios/App/App/public/
 ios/DerivedData/
 *.xcuserdatad/
 .DS_Store
+__pycache__/

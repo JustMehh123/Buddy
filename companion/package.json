@@ -10,8 +10,10 @@
   "scripts": {
     "start": "node server.mjs",
     "demo": "BUDDY_DEMO=1 node server.mjs",
-    "smoke": "node tools/page-smoke.mjs && node tools/voice-path.mjs",
-    "voice": "node tools/voice-path.mjs"
+    "smoke": "node tools/page-smoke.mjs && node tools/voice-path.mjs && node tools/bridge-security.mjs && node tools/token-mint.mjs",
+    "voice": "node tools/voice-path.mjs",
+    "security": "node tools/bridge-security.mjs",
+    "tokens": "node tools/token-mint.mjs"
   },
   "engines": {
     "node": ">=20"

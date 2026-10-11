@@ -50,10 +50,19 @@ public struct Packet: Codable, Sendable {
     public var text: String?
     /// A JPEG (base64) that goes with a tool result.
     public var image: String?
+    /// The bridge's secret, on anything that asks the Mac to *do* something.
+    ///
+    /// The Mac listens on the whole Wi-Fi and one of the things it can do is
+    /// move the mouse, so "which device am I talking to" has to be answered by
+    /// the Mac itself, not only by the bridge in front of it. The bridge reads
+    /// the secret the Mac wrote (`bridge-token`, readable only by this user)
+    /// and puts it on every packet. A connection from this same machine is
+    /// trusted without it, so nothing local is ever locked out.
+    public var auth: String?
 
     public init(face: FaceState? = nil, hello: String? = nil, volume: Double? = nil, command: String? = nil,
                 audio: String? = nil, speech: Int? = nil, callID: String? = nil, tool: String? = nil,
-                text: String? = nil, image: String? = nil) {
+                text: String? = nil, image: String? = nil, auth: String? = nil) {
         self.face = face
         self.hello = hello
         self.volume = volume
@@ -64,6 +73,7 @@ public struct Packet: Codable, Sendable {
         self.tool = tool
         self.text = text
         self.image = image
+        self.auth = auth
     }
 }
 

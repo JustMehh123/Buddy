@@ -19,6 +19,30 @@
 const AUDIO_IN_HZ = 16000;
 const AUDIO_OUT_HZ = 24000;
 
+/** A hard ceiling on connection attempts, so nothing can loop forever. */
+const MAX_ATTEMPTS = 5;
+
+/**
+ * What a closed socket means, said in words the user can act on. The voice
+ * service turns a bad, expired or already-used credential away with one of
+ * these codes, and it is worth being able to tell that apart from the Wi-Fi
+ * having dropped.
+ */
+const AUTH_CLOSE_CODES = new Set([1008, 401, 403, 4401, 4403]);
+export const closeReason = (event = {}) => {
+  const reason = (event.reason || '').trim();
+  const lower = reason.toLowerCase();
+  const looksLikeAuth = AUTH_CLOSE_CODES.has(event.code)
+    || lower.includes('unauthor')
+    || lower.includes('permission')
+    || lower.includes('api key')
+    || lower.includes('token');
+  if (looksLikeAuth) {
+    return `The voice service turned that credential away${reason ? ` (${reason})` : ''} — asking for a fresh one.`;
+  }
+  return reason || `The voice connection closed (code ${event.code ?? 'unknown'}).`;
+};
+
 /**
  * Google renames its live models every few months. If the one the computer
  * named cannot be reached, the next of these is tried instead of leaving the
@@ -66,6 +90,9 @@ export class LiveVoice {
     this.pendingSetup = null;
     this.lastGoAway = 0;
     this.openedAt = 0;
+    this.credentials = null;
+    this.attempts = 0;
+    this.handedInUsed = false;
   }
 
   get isConnected() {
@@ -82,26 +109,101 @@ export class LiveVoice {
     this.options.onStatus?.('connecting');
     await this.prepareAudio();
 
-    let lastError = null;
+    const failures = [];
     this.connecting = true;
+    this.attempts = 0;
+    this.handedInUsed = false;
     try {
       for (const model of modelChain(config.session?.model || config.model, config.fallbacks)) {
         try {
           this.config = { ...config, model };
-          await this.openSocket();
+          // A credential is minted for this attempt and this model only. It is
+          // asked for here, immediately before the socket opens, because a
+          // token that can start a new session is useless a minute later.
+          const credentials = await this.provision(model);
+          await this.openSocket(credentials);
           this.startAmbient();
           this.options.onStatus?.('ready');
           return;
         } catch (error) {
-          lastError = error;
+          failures.push(error);
           this.dropSocket();
           console.warn(`Buddy: the voice model ${model} did not answer (${error.message})`);
+          if (typeof config.mint !== 'function') {
+            // Nothing can produce another credential, so walking the rest of
+            // the model list would only produce the same failure. Say the one
+            // thing that has to happen instead.
+            throw explainRetry(error);
+          }
         }
       }
     } finally {
       this.connecting = false;
     }
-    throw lastError || new Error('No voice model answered.');
+    // Report the reason that explains the failure. The last attempt often fails
+    // only because the credential was already spent by the first one, and
+    // "single-use" is not the answer to "why would he not talk to me".
+    const useful = failures.find((error) => !/single-use/i.test(error.message));
+    throw useful || failures[0] || new Error('No voice model answered.');
+  }
+
+  /**
+   * Something usable for one connection attempt, asked for at the last moment.
+   *
+   * `mint` is the page's own call to the bridge (`/api/session`), which is the
+   * only thing that ever sees the real API key. Without it, the credentials
+   * handed to `connect()` are used — but a single-use token is never offered
+   * twice, so a retry with one of those fails with a clear reason instead of
+   * silently connecting to nothing.
+   */
+  async provision(model) {
+    const config = this.config;
+
+    // The credential the caller minted a moment ago, for the first attempt.
+    // It is the freshest possible thing: the page asks for it when the user
+    // presses the screen, not when the page loaded.
+    if (config.token && !this.handedInUsed) {
+      this.handedInUsed = true;
+      const expiresAt = Number(config.newSessionExpiresAt) || 0;
+      if (expiresAt && Date.now() > expiresAt - 4000) {
+        throw new Error('The voice credential expired before the session could start.');
+      }
+      return {
+        token: config.token,
+        wsUrl: config.wsUrl,
+        setup: config.setup || null,
+        model,
+        expiresAt
+      };
+    }
+
+    if (typeof config.mint === 'function') {
+      this.attempts += 1;
+      if (this.attempts > MAX_ATTEMPTS) throw new Error('Too many attempts to start the voice session.');
+      const minted = await config.mint(model);
+      const live = minted?.live ?? minted;
+      if (!live?.token) throw new Error('The computer did not return a voice credential.');
+      const expiresAt = Number(live.newSessionExpiresAt) || 0;
+      if (expiresAt && Date.now() > expiresAt - 4000) {
+        // Rare (the bridge is a few milliseconds away) but if it happens, say so
+        // rather than opening a socket that is certain to be turned away.
+        throw new Error('The voice credential expired before the session could start.');
+      }
+      return {
+        token: live.token,
+        wsUrl: live.wsUrl || config.wsUrl,
+        setup: live.setup || null,
+        model: live.model || model,
+        expiresAt
+      };
+    }
+
+    // Nothing left that can possibly work. A single-use credential that has
+    // already been tried cannot be used again, and saying so is far more
+    // useful than opening a socket that will certainly be turned away.
+    throw new Error(
+      'The voice credential was single-use and has already been tried. Ask the computer for a fresh one.'
+    );
   }
 
   /**
@@ -109,8 +211,9 @@ export class LiveVoice {
    * acknowledged the session with `setupComplete` — an open socket that never
    * answers is a failed attempt, not a working conversation.
    */
-  openSocket() {
-    const url = `${this.config.wsUrl}?access_token=${encodeURIComponent(this.config.token)}`;
+  openSocket(credentials) {
+    this.credentials = credentials;
+    const url = `${credentials.wsUrl}?access_token=${encodeURIComponent(credentials.token)}`;
     return new Promise((resolve, reject) => {
       let settled = false;
       const socket = new WebSocket(url);
@@ -136,24 +239,36 @@ export class LiveVoice {
       socket.onopen = () => {
         this.connected = true;
         this.openedAt = Date.now();
-        this.sendSetup(this.config);
+        this.sendSetup(this.config, credentials);
       };
       socket.onmessage = (event) => this.handleMessage(event.data);
       socket.onerror = () => fail(new Error('Could not reach the voice service.'));
       socket.onclose = (event) => {
         clearTimeout(timeout);
         this.connected = false;
+        const why = closeReason(event);
         // While trying models in turn, a closed socket is just a failed
         // attempt: no need to tell the page the session ended.
-        if (!this.connecting) this.options.onStatus?.('closed', event.reason || `code ${event.code}`);
-        if (!this.setupDone) fail(new Error(event.reason || 'The voice session closed before it started.'));
+        if (!this.connecting) this.options.onStatus?.('closed', why);
+        if (!this.setupDone) fail(new Error(why));
         else this.options.onClose?.();
       };
     });
   }
 
-  /** The `setup` message: who he is, what he can do, and how he should sound. */
-  sendSetup(config) {
+  /**
+   * The `setup` message: who he is, what he can do, and how he should sound.
+   *
+   * When the credential came with a `setup` (an ephemeral token is pinned to
+   * one session shape), that exact message is sent — anything else is refused
+   * by the service, and rightly so: it is what stops a stolen token from being
+   * used to run a session of someone else's choosing.
+   */
+  sendSetup(config, credentials = null) {
+    if (credentials?.setup) {
+      this.send({ setup: credentials.setup });
+      return;
+    }
     const session = config.session || {};
     const setup = {
       // config.model is the model this attempt is for; it already defaults to
@@ -203,6 +318,9 @@ export class LiveVoice {
     if (!session || (!instructions && !voice)) return false;
     if (instructions) session.instructions = instructions;
     if (voice) session.voice = normaliseVoice(voice);
+    // The session shape changed, so any token pinned to the old one is spent.
+    this.credentials = null;
+    this.setupPinned = false;
     this.options.onStatus?.('reconnect', 'New settings — starting a fresh voice session.');
     this.options.onClose?.();
     return true;
@@ -573,6 +691,19 @@ export class LiveVoice {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * The failure a page sees when it cannot ask for another credential. The
+ * original reason stays first — that is what happened — and the reason a retry
+ * cannot help is spelled out behind it.
+ */
+export const explainRetry = (error) => {
+  const why = error?.message || String(error);
+  if (/single-use/i.test(why)) return error;
+  return new Error(
+    `${why} That credential was single-use, so the computer has to hand over a fresh one before another model can be tried.`
+  );
+};
 
 /** Gemini's JSON-Schema dialect is strict: keep only what it accepts. */
 export const toFunctionDeclaration = (tool) => {

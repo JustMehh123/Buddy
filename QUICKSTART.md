@@ -41,9 +41,16 @@ The server prints something like:
   ▄▄▄▄▄▄▄ ▄  ▄▄ ▄▄▄▄▄▄ ▄▄▄▄▄▄▄
   █ ▄▄▄ █ ▄ ▀█▄ ▄ ▄▀█  █ ▄▄▄ █     <- scan this with your phone
   ...
-   1. On the phone (same Wi-Fi), open:   http://your-mac.local:8444/install
+   1. On the phone (same Wi-Fi), open:   http://your-mac.local:8444/install?pair=…
+      That page installs the little certificate he needs, then pairs the phone.
    2. Then add him to the home screen:   https://your-mac.local:8443/
 ```
+
+The long `pair=…` part of that link is a **one-time code**. It is what makes the
+phone that opens it *your* phone: the bridge only answers devices it has been
+introduced to, and the code stops working the moment it has been used. Nothing
+else on the Wi-Fi can reach him, and nobody can drive your Mac from the couch
+without that code.
 
 ---
 
@@ -52,17 +59,37 @@ The server prints something like:
 The phone and the Mac must be on the same Wi-Fi.
 
 1. **Point your phone's camera at the QR code** in the terminal and tap the link
-   that pops up — or type the `http://…:8444/install` address into Safari.
+   that pops up — or type the `http://…:8444/install?pair=…` address into Safari.
+   Keep the `?pair=…` part: that is the one-time pairing code, and the link stops
+   working after the phone has used it.
 2. On that page, tap **Install the Buddy certificate**. This is what lets a web
    page use the microphone.
 3. Tap **Allow** when Safari says it downloaded a profile.
 4. **Settings → General → VPN & Device Management → Buddy → Install.**
 5. **Settings → General → About → Certificate Trust Settings** → turn on the
    switch for **Buddy Local CA**.
-6. Back on the page, tap **Open Buddy**, then **Share → Add to Home Screen**.
+6. Back on the page, tap **Open Buddy**. The page pairs itself on the way in —
+   you do not have to type or paste anything. Then **Share → Add to Home Screen**.
 
-That's it — he now opens full-screen from his own icon.
+That's it — he now opens full-screen from his own icon, already paired.
 
+> If a second phone, or a phone that was set up before, asks to be paired, the
+> bridge has a fresh code printed at the bottom of its window: scan that. The
+> gear menu inside the app shows whether this phone is paired, and can unpair it.
+
+> **Why pairing?** The bridge listens on your whole Wi-Fi, and one of the things
+> it can do is move the mouse and type on your Mac. A phone has to be paired with
+> a one-time code before it can do any of that, and the request that asks for
+> control has to come from a paired phone. That is what makes him safe to leave
+> running on a shared network — a café, an office, a hotel.
+>
+> The Mac is careful on its own side too: it only obeys commands that carry a
+> secret it wrote itself (`~/Library/Application Support/Buddy/bridge-token`,
+> readable only by you). So a program on the same Wi-Fi cannot skip the bridge
+> and drive the cursor directly. If you ever run the bridge on a *different*
+> machine, copy that file's contents across and start it with
+> `BUDDY_MAC_TOKEN=… ./start.sh`.
+>
 > **What is that certificate?** The phone server makes a tiny private certificate
 > (with `openssl`, on your Mac, once) so the connection is `https`. iOS only hands
 > the microphone to a web page on a trusted connection, so this is the one-time
@@ -109,6 +136,9 @@ your browser. Good for checking the phone side before the rest is set up.
 | "No voice provider is available" | No key yet: **Voice Key (free Gemini)…** in his menu, or start with `GEMINI_API_KEY=… ./start.sh`. |
 | He answers with the phone's voice, not his own | That is the fallback when the realtime voice cannot be reached — usually a missing or rejected key. |
 | A new Wi-Fi or a new IP | `node companion/server.mjs --regen-certs`, then reinstall the profile on the phone. |
+| A new phone, or one that lost its pairing | The bridge prints a fresh one-time link every time it starts. Open it on the phone. |
+| A phone you want to cut off | `node companion/server.mjs --revoke all` (or `--devices` to see the list first, then `--revoke <id>`). |
+| Wondering which phones are paired | `node companion/server.mjs --devices` |
 | Port already in use | He takes the next free port and prints it — just use the address he shows. |
 
 ### What runs where
@@ -122,5 +152,31 @@ your browser. Good for checking the phone side before the rest is set up.
 
 One key covers all of it. It is stored in
 `~/Library/Application Support/Buddy/keys.json` (readable only by you) and never
-leaves the Mac: the phone gets a token that is good for one session and expires
-on its own.
+leaves the Mac. The phone is handed a token for **one session**, pinned to the
+exact conversation he is about to have, good for starting a session for about
+two minutes and expired half an hour after that — and it is asked for at the
+moment you press the screen, not when the page loads.
+
+### Checking it yourself
+
+Everything below runs without an API key and without leaving your Mac:
+
+```sh
+npm --prefix companion ci          # the bridge's one dependency tree
+npm --prefix companion run smoke   # 143 checks: page, voice path, security, tokens
+python3 tools/check-symbols.py     # every Foo.bar in the Swift sources resolves
+swift build -c release --product BuddyMac   # the menu bar app
+./scripts/build-mac.sh             # and the signed .app bundle
+```
+
+`npm run smoke` covers the four suites in `companion/tools/`: the phone page in a
+fake browser (including pairing and that loading it spends no voice token), the
+voice protocol against a fake socket (including what happens when a model is
+retired or a credential is refused), the bridge with no trust at all (a device
+that was never paired, path traversal, revocation, the log), and the token
+request itself against a local stand-in for Gemini.
+
+What that cannot cover, and has to be tried on your own Mac with your own key:
+the real voice session, a real ephemeral token, real research and transcription,
+and the certificate step on a real iPhone. Those are the last four rows of the
+table in the report's checklist, and they need ears.

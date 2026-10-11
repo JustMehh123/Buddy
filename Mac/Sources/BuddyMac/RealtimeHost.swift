@@ -30,26 +30,50 @@ final class RealtimeHost {
     func handle(_ packet: Packet, reply: @escaping (Packet) -> Void) {
         switch packet.command {
         case "liveToken", "realtimeToken":
-            // The phone (or the little web bridge) asks for permission to talk:
-            // a one-shot Gemini token, plus his instructions and tools.
+            // The phone (or the little web bridge) asks for permission to talk.
+            // It may name the model it wants to try, and it gets back a token
+            // good for exactly that session — minted this moment, because the
+            // window for starting a session with one of these is short.
             Task { @MainActor in
+                let request = packet.text
+                    .flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } ?? [:]
+                let wanted = (request["model"] as? String)?.trimmingCharacters(in: .whitespaces)
+                let model = (wanted?.isEmpty == false) ? wanted! : Gemini.liveModel
+                let wantsConstraints = (request["constrained"] as? Bool) ?? true
+                let setup = Self.sessionSetup(model: model)
+
                 do {
-                    let token = try await Gemini.liveToken()
+                    var token: Gemini.LiveToken
+                    do {
+                        token = try await Gemini.liveToken(setup: setup, model: model, constrained: wantsConstraints)
+                    } catch {
+                        // Some accounts and older surfaces reject constrained
+                        // tokens. Better to talk without them than not at all,
+                        // so this is retried once, and said out loud.
+                        guard wantsConstraints else { throw error }
+                        NSLog("Buddy: a token with constraints was refused (\(error)); minting a plain one")
+                        token = try await Gemini.liveToken(setup: nil, model: model, constrained: false)
+                    }
                     let payload: [String: Any] = [
                         "provider": "gemini",
                         "token": token.value,
                         "wsUrl": Gemini.liveWebSocket,
-                        "model": Gemini.liveModel,
+                        "model": token.model,
+                        "constrained": token.constrained,
                         "fallbacks": Gemini.liveFallbacks,
                         "expiresAt": token.expiresAt.timeIntervalSince1970 * 1000,
-                        "session": Self.session,
+                        "newSessionExpiresAt": token.newSessionExpiresAt.timeIntervalSince1970 * 1000,
+                        "setup": setup,
                     ]
                     let text = (try? JSONSerialization.data(withJSONObject: payload))
                         .flatMap { String(data: $0, encoding: .utf8) }
                     reply(Packet(command: "liveToken", callID: packet.callID, text: text))
                 } catch {
+                    // Never the token or the key in the log: just what went wrong.
                     NSLog("Buddy: could not mint a voice token: \(error)")
-                    reply(Packet(command: "liveToken", callID: packet.callID))
+                    reply(Packet(command: "liveToken", callID: packet.callID,
+                                 text: (try? JSONSerialization.data(withJSONObject: ["error": error.localizedDescription]))
+                                     .flatMap { String(data: $0, encoding: .utf8) }))
                     self.showCaption(error.localizedDescription, for: 6)
                 }
             }
@@ -62,6 +86,7 @@ final class RealtimeHost {
                 "voice": Settings.shared.voice,
                 "model": Gemini.liveModel,
                 "temperature": 0.9,
+                "setup": Self.sessionSetup(model: Gemini.liveModel),
             ]
             reply(Packet(command: "webSession", callID: packet.callID,
                          text: (try? JSONSerialization.data(withJSONObject: sessionPayload))
@@ -690,15 +715,30 @@ final class RealtimeHost {
         personality + "\n\n" + toolGuide + (Settings.shared.computerControl ? "\n\n" + computerGuide : "")
     }
 
-    /// What the phone needs to start a voice session: his identity, his tools,
-    /// and how he should sound. The credential itself is minted separately.
-    static var session: [String: Any] {
-        [
-            "model": Gemini.liveModel,
-            "instructions": instructions,
-            "voice": Settings.shared.voice,
-            "temperature": 0.9,
-            "tools": tools,
+    /// The session the phone runs, exactly as it will be sent in the setup
+    /// frame — and, when a constrained token is minted, exactly what that token
+    /// is pinned to. One source of truth, so the two can never disagree.
+    static func sessionSetup(model: String? = nil) -> [String: Any] {
+        var setup: [String: Any] = [
+            "model": "models/\(model ?? Gemini.liveModel)",
+            "generationConfig": [
+                "responseModalities": ["AUDIO"],
+                "temperature": 0.9,
+                "speechConfig": [
+                    "voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Settings.shared.voice]],
+                ],
+            ],
+            "systemInstruction": ["parts": [["text": instructions]]],
+            "inputAudioTranscription": [:],
+            "outputAudioTranscription": [:],
+            // Long chats would otherwise hit the context limit.
+            "contextWindowCompression": ["slidingWindow": [:]],
         ]
+        if !tools.isEmpty {
+            setup["tools"] = [["functionDeclarations": tools]]
+        }
+        // Push-to-talk: nothing is answered until the screen is held and let go.
+        setup["realtimeInputConfig"] = ["automaticActivityDetection": ["disabled": true]]
+        return setup
     }
 }

@@ -25,13 +25,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
 import { connect } from 'node:net';
 import { homedir, hostname, networkInterfaces } from 'node:os';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, isAbsolute, join, relative as relative_, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -43,11 +43,21 @@ const SERVICE_TYPE = 'buddy';
 const FORCED_HOST = process.env.BUDDY_HOST || '';
 const FORCED_PORT = process.env.BUDDY_PORT ? Number(process.env.BUDDY_PORT) : 0;
 const CERT_DIR = process.env.BUDDY_CERT_DIR || join(HERE, '.certs');
+/// Paired phones live here, with only a hash of each device token.
+const PAIR_FILE = process.env.BUDDY_PAIR_FILE || join(HERE, '.buddy', 'pair.json');
+/// How long a setup link (the QR code) stays usable.
+const PAIR_WINDOW_MS = Number(process.env.BUDDY_PAIR_WINDOW ?? 30 * 60 * 1000);
+/// How long a freshly minted token can still start a session.
+const SESSION_WINDOW_SECONDS = 150;
 
 // Gemini's free tier is what makes Buddy free to run; these are its realtime models.
 const GEMINI_LIVE_WS =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
+  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained';
+const GEMINI_AUTH_TOKEN_VERSIONS = ['v1beta', 'v1alpha'];
+/// Where Gemini lives. Overridable so the token path can be tested against a
+/// local stand-in (and so an account behind a proxy is not stuck).
+const GEMINI_BASE = (process.env.BUDDY_GEMINI_BASE || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
+const GEMINI_API = `${GEMINI_BASE}/v1beta`;
 const DEFAULT_LIVE_MODEL = process.env.BUDDY_LIVE_MODEL || 'gemini-3.8-live';
 const DEFAULT_CHAT_MODEL = process.env.BUDDY_CHAT_MODEL || 'gemini-3.8-flash';
 
@@ -90,6 +100,161 @@ const mac = {
 let sequence = 0;
 const callID = () => `b${++sequence}${Date.now().toString(36)}`;
 
+// ────────────────────────────────────────────────────────────────────────────
+// Pairing: only a phone the user set up can talk to the computer
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The bridge listens on every interface, and one of the things it can do is
+// drive the user's mouse and keyboard. So it is not enough that it is on the
+// same Wi-Fi: a device has to be paired first.
+//
+// How it works, end to end:
+//
+//   1. On startup the bridge makes a single-use *setup secret* and puts it in
+//      the QR code (and the printed link). Both travel over the user's own
+//      terminal and screen — never over the network to anyone else.
+//   2. The phone opens that link with ?pair=<secret>. The page POSTs the secret
+//      to /api/pair and gets back a long-lived *device token*.
+//   3. The phone keeps the device token and sends it with everything else. The
+//      bridge stores only its SHA-256, so the file on disk is not a credential.
+//   4. The setup secret is rotated the moment it is used, so a link that leaked
+//      (a screenshot, a shoulder) is worthless afterwards.
+//
+// Anything without a device token gets 401: no session, no commands, no stream,
+// and no answers from the model. The Gemini key never reaches the browser.
+
+const pairing = { setupSecret: '', setupIssuedAt: 0, devices: [] };
+const pairFailures = new Map(); // ip → { count, firstAt }
+
+function hashToken(token) {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+function loadPairing() {
+  try {
+    const saved = JSON.parse(readFileSync(PAIR_FILE, 'utf8'));
+    pairing.setupSecret = typeof saved.setupSecret === 'string' ? saved.setupSecret : '';
+    pairing.setupIssuedAt = Number(saved.setupIssuedAt) || 0;
+    pairing.devices = Array.isArray(saved.devices) ? saved.devices : [];
+  } catch {
+    /* first run */
+  }
+  if (pairing.devices.length === 0 || process.argv.includes('--pair-new') || !validSetupSecret(pairing.setupSecret)) {
+    issueSetupSecret();
+  }
+  try {
+    pairingMtime = statSync(PAIR_FILE).mtimeMs;
+  } catch {
+    pairingMtime = 0;
+  }
+}
+
+let pairingMtime = 0;
+
+function savePairing() {
+  try {
+    mkdirSync(join(PAIR_FILE, '..'), { recursive: true });
+    writeFileSync(PAIR_FILE, JSON.stringify(pairing, null, 2), { mode: 0o600 });
+    pairingMtime = statSync(PAIR_FILE).mtimeMs;
+  } catch (error) {
+    warn(`could not save the pairing file (${error.message})`);
+  }
+}
+
+/**
+ * Pairing is also edited from the command line (`--revoke`), which runs in a
+ * separate process. So the file, not memory, is what counts: if it changed
+ * since the last look, take the new contents. One stat per request, and a
+ * revoked phone stops working immediately instead of at the next restart.
+ */
+function reloadPairingIfChanged() {
+  let stat;
+  try {
+    stat = statSync(PAIR_FILE);
+  } catch {
+    return; // no file yet
+  }
+  if (stat.mtimeMs === pairingMtime) return;
+  try {
+    const saved = JSON.parse(readFileSync(PAIR_FILE, 'utf8'));
+    const before = pairing.devices.length;
+    pairing.setupSecret = typeof saved.setupSecret === 'string' ? saved.setupSecret : '';
+    pairing.setupIssuedAt = Number(saved.setupIssuedAt) || 0;
+    pairing.devices = Array.isArray(saved.devices) ? saved.devices : [];
+    pairingMtime = stat.mtimeMs;
+    if (pairing.devices.length < before) log('a paired phone was revoked — it no longer has access');
+  } catch (error) {
+    warn(`could not read the pairing file (${error.message})`);
+  }
+}
+
+function validSetupSecret(secret) {
+  return typeof secret === 'string' && secret.length >= 32
+    && Date.now() - pairing.setupIssuedAt < PAIR_WINDOW_MS;
+}
+
+function issueSetupSecret() {
+  pairing.setupSecret = randomBytes(32).toString('hex');
+  pairing.setupIssuedAt = Date.now();
+  savePairing();
+}
+
+/** Constant-time compare, so a wrong secret cannot be narrowed down by timing. */
+function secretMatches(candidate) {
+  if (!validSetupSecret(pairing.setupSecret) || typeof candidate !== 'string') return false;
+  const a = Buffer.from(hashToken(candidate));
+  const b = Buffer.from(hashToken(pairing.setupSecret));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** The device behind this request, or null. */
+function deviceFor(request, url) {
+  reloadPairingIfChanged();
+  const header = request.headers.authorization || '';
+  const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
+  const token = bearer || url.searchParams.get('token') || '';
+  if (!token) return null;
+  const hash = hashToken(token);
+  const device = pairing.devices.find((entry) => entry.tokenHash === hash);
+  if (!device) return null;
+  device.lastSeen = Date.now();
+  savePairingLater();
+  return device;
+}
+
+let pairingSaveTimer = null;
+function savePairingLater() {
+  if (pairingSaveTimer) return;
+  pairingSaveTimer = setTimeout(() => {
+    pairingSaveTimer = null;
+    savePairing();
+  }, 5000);
+}
+
+function revokeDevice(id) {
+  const before = pairing.devices.length;
+  pairing.devices = pairing.devices.filter((device) => device.id !== id && device.name !== id);
+  savePairing();
+  return before - pairing.devices.length;
+}
+
+/** Brute force is hopeless against 32 random bytes, but cheap to make worse. */
+function throttled(ip) {
+  const entry = pairFailures.get(ip);
+  if (!entry) return false;
+  if (Date.now() - entry.firstAt > 10 * 60 * 1000) {
+    pairFailures.delete(ip);
+    return false;
+  }
+  return entry.count >= 10;
+}
+
+function notePairFailure(ip) {
+  const entry = pairFailures.get(ip) ?? { count: 0, firstAt: Date.now() };
+  entry.count += 1;
+  pairFailures.set(ip, entry);
+}
+
 /** Every phone currently showing his face (one open event stream each). */
 const streams = new Set();
 
@@ -126,10 +291,27 @@ function askMac(packet, timeoutMs = 8000) {
   });
 }
 
+/**
+ * The secret the Mac put in its own Application Support folder. The Mac only
+ * obeys commands that carry it, so a random program on the same Wi-Fi cannot
+ * skip the bridge and drive the cursor itself.
+ */
+function macBridgeToken() {
+  if (process.env.BUDDY_MAC_TOKEN) return process.env.BUDDY_MAC_TOKEN;
+  try {
+    const path = join(homedir(), 'Library', 'Application Support', 'Buddy', 'bridge-token');
+    const value = readFileSync(path, 'utf8').trim();
+    return value.length >= 32 ? value : '';
+  } catch {
+    return '';
+  }
+}
+
 function sendToMac(packet) {
   if (mac.socket?.writable) {
     try {
-      mac.socket.write(`${JSON.stringify(packet)}\n`);
+      const token = macBridgeToken();
+      mac.socket.write(`${JSON.stringify(token ? { auth: token, ...packet } : packet)}\n`);
       return true;
     } catch {
       return false;
@@ -380,35 +562,59 @@ function makeProfile(openssl, caPath) {
  * one-shot realtime token. A freshly renamed Mac build answers `liveToken`; if
  * it doesn't, we fall back to our own Gemini key so the phone still works.
  */
-async function getSession() {
-  const fromMac = await askMac({ command: 'liveToken' }, 3000);
+/**
+ * Who he is and what he can do — no credential. Used to fill in the page's
+ * settings sheet as soon as it opens, without starting any token's clock.
+ */
+async function getInfo() {
+  const session = await askMac({ command: 'webSession' }, 2500);
+  const extra = session?.text ? safeJson(session.text) : null;
+  const key = geminiKey();
+  return {
+    host: { name: mac.name },
+    demo: DEMO,
+    hasKey: Boolean(key),
+    settings: {
+      name: 'Buddy',
+      voice: extra?.voice || 'Puck',
+      computerUse: true,
+      chime: true
+    },
+    model: extra?.model || DEFAULT_LIVE_MODEL,
+    instructions: extra?.instructions || DEFAULT_INSTRUCTIONS
+  };
+}
 
+/**
+ * Permission to talk: a token minted *now*, for one named model. Called by the
+ * page immediately before each connection attempt, because the window for
+ * starting a session with a token is short and single-use.
+ */
+async function getSession(device, request = {}) {
+  const wanted = typeof request.model === 'string' && request.model.trim() ? request.model.trim() : '';
+  const constrained = request.constrained !== false;
+
+  if (DEMO && !geminiKey()) return demoSession();
+
+  // Preferred: the Mac mints it, so his instructions, voice and tools — and the
+  // key itself — never leave that machine.
+  const fromMac = await askMac(
+    { command: 'liveToken', text: JSON.stringify({ model: wanted || undefined, constrained }) },
+    6000
+  );
   if (fromMac?.text) {
-    try {
-      const live = normalizeLive(JSON.parse(fromMac.text));
-      if (live) {
-        const session = await askMac({ command: 'webSession' }, 2500);
-        if (session?.text) {
-          try {
-            Object.assign(live.session, JSON.parse(session.text));
-          } catch {
-            /* the Mac's session config is optional */
-          }
-        }
-        return { live, host: { name: mac.name } };
-      }
-    } catch {
-      /* fall through to our own key */
+    const parsed = safeJson(fromMac.text);
+    if (parsed?.error) throw new Error(parsed.error);
+    const live = normalizeLive(parsed);
+    if (live) {
+      log(`the Mac minted a voice token for ${device?.name ?? 'a phone'} (${live.model})`);
+      return { live, host: { name: mac.name } };
     }
   }
 
   const key = geminiKey();
   if (key) {
-    const live = await mintGeminiFromEnv(key);
-    const session = await askMac({ command: 'webSession' }, 2500);
-    const extra = session?.text ? safeJson(session.text) : null;
-    if (extra?.instructions) live.session.instructions = extra.instructions;
-    if (Array.isArray(extra?.tools) && extra.tools.length) live.session.tools = extra.tools.map(stripMeta);
+    const live = await mintGeminiToken(key, { model: wanted || DEFAULT_LIVE_MODEL, constrained });
     return { live, host: { name: mac.name }, demo: DEMO || undefined };
   }
 
@@ -429,57 +635,142 @@ const safeJson = (text) => {
 };
 
 /** Accept the token the Mac minted. */
+/**
+ * What the Mac answered, in the shape the page reads. Everything the Mac said
+ * about the credential is carried through — the window it can start a session
+ * in, whether it is constrained, and above all the *setup* it is pinned to:
+ * dropping that would leave the page sending a session the token does not
+ * allow, and the voice service would refuse it.
+ */
 function normalizeLive(parsed) {
-  if (!parsed.token) return null;
+  if (!parsed?.token) return null;
+  const model = parsed.model || DEFAULT_LIVE_MODEL;
   return {
     provider: 'gemini',
     token: parsed.token,
     wsUrl: parsed.wsUrl || GEMINI_LIVE_WS,
-    model: parsed.model || DEFAULT_LIVE_MODEL,
+    model,
+    constrained: parsed.constrained !== false,
     fallbacks: Array.isArray(parsed.fallbacks) ? parsed.fallbacks : undefined,
     expiresAt: parsed.expiresAt || Date.now() + 30 * 60 * 1000,
-    session: parsed.session || defaultSession(parsed.model || DEFAULT_LIVE_MODEL)
+    newSessionExpiresAt: parsed.newSessionExpiresAt || Date.now() + SESSION_WINDOW_SECONDS * 1000,
+    setup: parsed.setup || parsed.session?.setup || defaultSetup(model),
+    session: parsed.session || defaultSession(model)
   };
 }
 
-async function mintGeminiFromEnv(key) {
-  const expireTime = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-  const response = await fetch('https://generativelanguage.googleapis.com/v1alpha/auth_tokens', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({ uses: 1, expireTime })
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Gemini rejected the key (${response.status}). ${detail.slice(0, 160)}`);
+/**
+ * A one-shot credential for the phone's voice session.
+ *
+ * Two details matter and both are easy to get wrong:
+ *
+ *   newSessionExpireTime — the window in which a *new* session may be started
+ *   with this token. It defaults to one minute, which is far too short for a
+ *   page someone opens and then thinks about. It is set here explicitly, and
+ *   the page asks for a token immediately before it connects, never at load.
+ *
+ *   liveConnectConstraints — the session is baked into the token, and the phone
+ *   connects through the constrained endpoint. A token that leaks is only good
+ *   for Buddy's own session shape.
+ */
+async function mintGeminiToken(key, { model = DEFAULT_LIVE_MODEL, setup = null, constrained = true } = {}) {
+  const now = Date.now();
+  const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
+  const newSessionExpireTime = new Date(now + SESSION_WINDOW_SECONDS * 1000).toISOString();
+  const configured = normaliseSetup(setup, model);
+
+  const payload = { uses: 1, expireTime, newSessionExpireTime };
+  if (constrained) {
+    payload.liveConnectConstraints = { model: `models/${model}`, config: configured };
   }
-  const json = await response.json();
-  log('minted a one-shot Gemini voice token for the phone');
-  return {
-    provider: 'gemini',
-    token: json.name,
-    wsUrl: GEMINI_LIVE_WS,
-    model: DEFAULT_LIVE_MODEL,
-    expiresAt: Date.parse(expireTime),
-    session: defaultSession(DEFAULT_LIVE_MODEL)
-  };
+
+  let lastError = null;
+  for (const version of GEMINI_AUTH_TOKEN_VERSIONS) {
+    const response = await fetch(`${GEMINI_BASE}/${version}/auth_tokens`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify(payload)
+    });
+    if (response.ok) {
+      const json = await response.json();
+      if (!json?.name) throw new Error('Gemini returned a token without a name');
+      log(`minted a one-shot voice token (${model}${constrained ? ', constrained' : ''})`);
+      return {
+        provider: 'gemini',
+        token: json.name,
+        wsUrl: GEMINI_LIVE_WS,
+        model,
+        constrained,
+        fallbacks: DEFAULT_LIVE_FALLBACKS.filter((entry) => entry !== model),
+        expiresAt: Date.parse(json.expireTime || expireTime),
+        newSessionExpiresAt: Date.parse(json.newSessionExpireTime || newSessionExpireTime),
+        setup: configured
+      };
+    }
+    const detail = await response.text();
+    const refused = new Error(`Gemini rejected the token request (${response.status}). ${detail.slice(0, 160)}`);
+    lastError = refused;
+
+    // 404: this version of the endpoint is not the one this account has.
+    if (response.status === 404) {
+      warn(`the ${version} auth_tokens endpoint answered 404; trying the other version`);
+      continue;
+    }
+    // A refusal that is not about permission is usually the constraints: an
+    // account without access to that live model cannot pin a token to it. The
+    // same token without constraints still gives the phone a voice — and the
+    // Mac's own minting does exactly the same thing.
+    if (constrained && response.status !== 401 && response.status !== 403) {
+      warn('the constrained token was refused; minting one without the session pinned to it');
+      return mintGeminiToken(key, { model, setup, constrained: false });
+    }
+    throw refused;
+  }
+  throw lastError ?? new Error('no token endpoint answered');
 }
+
+const DEFAULT_LIVE_FALLBACKS = [
+  DEFAULT_LIVE_MODEL,
+  'gemini-3.1-flash-live-preview',
+  'gemini-2.5-flash-native-audio-preview-12-2025'
+];
+
+const DEFAULT_INSTRUCTIONS =
+  "You are Buddy: a small, warm, slightly cheeky companion who lives on the user's phone and in their computer. Keep replies to one or two short spoken sentences, never lists or markdown.";
 
 const defaultSession = (model) => ({
   model,
   voice: 'Puck',
   temperature: 0.85,
-  outputModalities: ['audio'],
-  instructions:
-    "You are Buddy: a small, warm, slightly cheeky companion who lives on the user's phone and in their computer. You can hear them whenever they hold the screen and talk. Keep replies to one or two short spoken sentences, never lists or markdown. Use your eye and cursor tools to look at their screen and point at things — point rather than click, and only touch the computer when asked.",
-  tools: []
+  instructions: DEFAULT_INSTRUCTIONS,
+  tools: [],
+  setup: defaultSetup(model),
 });
 
-/**
- * Demo mode has no real voice provider, so we deliberately send no `live`
- * block: the page then falls back to the phone's own voice and to `/api/chat`,
- * which answers from the script below. Talking to him in demo mode works.
- */
+function defaultSetup(model) {
+  return {
+    model: `models/${model}`,
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      temperature: 0.85,
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
+    },
+    systemInstruction: { parts: [{ text: DEFAULT_INSTRUCTIONS }] },
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
+    contextWindowCompression: { slidingWindow: {} },
+    realtimeInputConfig: { automaticActivityDetection: { disabled: true } },
+  };
+}
+
+/** Fill in a setup the Mac sent, for the fields the page needs present. */
+function normaliseSetup(setup, model) {
+  if (!setup || typeof setup !== 'object') return defaultSetup(model);
+  const merged = { ...defaultSetup(model), ...setup };
+  merged.model = setup.model || `models/${model}`;
+  return merged;
+}
+
 function demoSession() {
   return { host: { name: 'the demo computer' }, demo: true };
 }
@@ -576,7 +867,7 @@ function startDemo() {
 // The phone's packets
 // ────────────────────────────────────────────────────────────────────────────
 
-function handlePhonePacket(packet) {
+function handlePhonePacket(packet, device = null) {
   if (DEMO) return demoReply(packet);
 
   // Tools and session chatter go to the Mac, with replies routed back.
@@ -646,19 +937,103 @@ const MIME = {
 // is already terminating TLS, or when you only want his face on a second screen.
 const plainHTTP = process.argv.includes('--http') || process.env.BUDDY_NO_TLS === '1';
 const certificates = plainHTTP ? null : ensureCertificates({ force: process.argv.includes('--regen-certs') });
+loadPairing();
+
+/**
+ * The API, in one place, with the pairing check in front of everything that can
+ * do anything. Only /api/pair (and a status that reveals nothing) answers
+ * without a device token.
+ */
+/// The port the app actually ended up on (listen() may have had to step up).
+let appPort = PORT;
+
+/** The address the phone should end up on, carrying the setup secret if it is
+ *  still unused, so pairing happens as part of the same tap. */
+function appUrlFor(request) {
+  const host = (request.headers.host || '').split(':')[0] || 'localhost';
+  const scheme = certificates ? 'https' : 'http';
+  const secret = validSetupSecret(pairing.setupSecret) ? `?pair=${pairing.setupSecret}` : '';
+  return `${scheme}://${host}:${appPort}/${secret}`;
+}
 
 const handler = async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+  const path = url.pathname;
+  const ip = request.socket?.remoteAddress || 'unknown';
 
-  // The phone asks for a session: instructions, tools and a one-shot token.
-  if (url.pathname === '/api/session' && request.method === 'POST') {
+  // ── Setup pages and the app itself (no token needed to load the page) ────
+  if (!path.startsWith('/api/')) {
+    if (path === '/install') return installPage(response, certificates ? 'http' : 'https', appUrlFor(request));
+    if (path === '/buddy-ca.mobileconfig' || path === '/buddy.mobileconfig') {
+      if (!certificates) return json(response, 404, { error: 'no certificate — run with --regen-certs on a machine with openssl' });
+      try {
+        const body = readFileSync(join(CERT_DIR, 'buddy-ca.mobileconfig'));
+        response.writeHead(200, { 'content-type': MIME['.mobileconfig'], 'content-length': body.length });
+        return response.end(body);
+      } catch (error) {
+        return json(response, 500, { error: error.message });
+      }
+    }
+    if (path === '/buddy-ca.crt') {
+      if (!certificates) return json(response, 404, { error: 'no certificate' });
+      const body = readFileSync(join(CERT_DIR, 'buddy-ca.crt'));
+      response.writeHead(200, { 'content-type': 'application/x-x509-ca-cert', 'content-length': body.length });
+      return response.end(body);
+    }
+    return serveStatic(path, response);
+  }
+
+  // ── Pairing: the only endpoint without a device token ────────────────────
+  if (path === '/api/pair') {
+    if (request.method !== 'POST') return json(response, 405, { error: 'POST a pairing code here' });
+    return handlePair(request, response, ip);
+  }
+
+  // ── Status: nothing sensitive without a token ────────────────────────────
+  if (path === '/api/status') {
+    const device = deviceFor(request, url);
+    if (!device) return json(response, 200, { paired: false });
+    return json(response, 200, {
+      paired: true,
+      device: { id: device.id, name: device.name },
+      devices: pairing.devices.length,
+      mac: { connected: mac.connected, host: mac.host, port: mac.port, name: mac.name },
+      demo: DEMO,
+      secure: Boolean(certificates),
+      geminiKeyOnBridge: Boolean(geminiKey()),
+      phones: streams.size
+    });
+  }
+
+  // ── Everything past here needs a paired device ───────────────────────────
+  const device = deviceFor(request, url);
+  if (!device) {
+    return json(response, 401, {
+      error: 'This device is not paired with the computer yet.',
+      hint: 'Open the setup link the bridge printed (or its QR code) to pair it.'
+    });
+  }
+
+  if (path === '/api/info') {
     try {
-      const session = await getSession();
+      return json(response, 200, { ...(await getInfo()), device: { id: device.id, name: device.name } });
+    } catch (error) {
+      return json(response, 503, { error: error.message });
+    }
+  }
+
+  // Permission to talk. Called immediately before each connection attempt, so
+  // the short window for starting a session is never wasted.
+  if (path === '/api/session' && request.method === 'POST') {
+    try {
+      const body = await readJson(request).catch(() => ({}));
+      const session = await getSession(device, body);
       return json(response, 200, {
         ...session,
         settings: {
           name: 'Buddy',
-          voice: session.live?.session?.voice || 'Puck',
+          voice: session.live?.setup?.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName
+            || session.live?.session?.voice || 'Puck',
           computerUse: true,
           chime: true
         }
@@ -669,7 +1044,7 @@ const handler = async (request, response) => {
   }
 
   // The on-device-voice fallback, and typed messages.
-  if (url.pathname === '/api/chat' && request.method === 'POST') {
+  if (path === '/api/chat' && request.method === 'POST') {
     try {
       const body = await readJson(request);
       return json(response, 200, await chat(body));
@@ -679,7 +1054,7 @@ const handler = async (request, response) => {
   }
 
   // The packets the page sends up: hello, awake, caption, tool…
-  if (url.pathname === '/api/send' && request.method === 'POST') {
+  if (path === '/api/send' && request.method === 'POST') {
     let packet;
     try {
       packet = await readJson(request);
@@ -687,47 +1062,58 @@ const handler = async (request, response) => {
       return json(response, 400, { error: 'that was not JSON' });
     }
     json(response, 200, { ok: true });
-    handlePhonePacket(packet);
+    handlePhonePacket(packet, device);
     return;
   }
 
   // The long-lived stream coming down: face, captions, tool results.
-  if (url.pathname === '/api/events') return openStream(request, response);
+  if (path === '/api/events') return openStream(request, response);
 
-  if (url.pathname === '/api/status') {
-    return json(response, 200, {
-      mac: { connected: mac.connected, host: mac.host, port: mac.port, name: mac.name },
-      demo: DEMO,
-      secure: Boolean(certificates),
-      geminiKeyOnBridge: Boolean(geminiKey()),
-      phones: streams.size
-    });
+  // The phone forgetting itself: revoke from the phone's side too.
+  if (path === '/api/unpair' && request.method === 'POST') {
+    revokeDevice(device.id);
+    log(`unpaired "${device.name}" at its own request`);
+    return json(response, 200, { ok: true });
   }
 
-  // Installing the certificate on the phone, spelled out.
-  if (url.pathname === '/install') return installPage(response);
-
-  if (url.pathname === '/buddy-ca.mobileconfig' || url.pathname === '/buddy.mobileconfig') {
-    if (!certificates) return json(response, 404, { error: 'no certificate — run with --regen-certs on a machine with openssl' });
-    try {
-      const body = readFileSync(join(CERT_DIR, 'buddy-ca.mobileconfig'));
-      response.writeHead(200, { 'content-type': MIME['.mobileconfig'], 'content-length': body.length });
-      return response.end(body);
-    } catch (error) {
-      return json(response, 500, { error: error.message });
-    }
-  }
-
-  if (url.pathname === '/buddy-ca.crt') {
-    if (!certificates) return json(response, 404, { error: 'no certificate' });
-    const body = readFileSync(join(CERT_DIR, 'buddy-ca.crt'));
-    response.writeHead(200, { 'content-type': 'application/x-x509-ca-cert', 'content-length': body.length });
-    return response.end(body);
-  }
-
-  // Static files — the phone app itself.
-  return serveStatic(url.pathname, response);
+  return json(response, 404, { error: 'no such endpoint' });
 };
+
+/**
+ * A phone trades the setup secret for a device token. The secret is single-use:
+ * it is rotated the moment it works, so a link that leaked is worthless.
+ */
+async function handlePair(request, response, ip) {
+  if (throttled(ip)) {
+    return json(response, 429, { error: 'Too many pairing attempts. Restart the bridge for a fresh code.' });
+  }
+  let body = {};
+  try {
+    body = await readJson(request);
+  } catch {
+    return json(response, 400, { error: 'that was not JSON' });
+  }
+  const name = String(body.name || 'phone').trim().slice(0, 40) || 'phone';
+  if (!secretMatches(body.secret)) {
+    notePairFailure(ip);
+    warn('a device tried to pair with the wrong or expired code');
+    return json(response, 401, { error: 'That pairing code is wrong or has expired. Run the bridge again for a fresh one.' });
+  }
+
+  const token = randomBytes(32).toString('hex');
+  const device = {
+    id: `d_${randomBytes(4).toString('hex')}`,
+    name,
+    tokenHash: hashToken(token),
+    pairedAt: Date.now(),
+    lastSeen: Date.now()
+  };
+  pairing.devices.push(device);
+  issueSetupSecret(); // single use
+  savePairing();
+  log(`paired with "${name}" (${device.id}). The setup link has been rotated — scan the new one to pair another phone.`);
+  return json(response, 200, { token, device: { id: device.id, name: device.name } });
+}
 
 const server = certificates
   ? createSecureServer({ key: certificates.key, cert: certificates.cert }, handler)
@@ -827,13 +1213,32 @@ async function readJson(request) {
 }
 
 function serveStatic(pathname, response) {
-  let relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
-  const target = normalize(join(WEB_DIR, relative));
-  if (!target.startsWith(WEB_DIR)) {
-    response.writeHead(403).end('no');
-    return;
+  let relative;
+  try {
+    relative = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
+  } catch {
+    // A malformed escape (say "%zz") is a request we simply refuse.
+    response.writeHead(400, { 'content-type': 'text/plain' });
+    return response.end('bad path');
   }
-  const file = existsSync(target) && statSync(target).isFile() ? target : join(WEB_DIR, 'index.html');
+
+  // Resolve against the web directory and make sure the result is *inside* it.
+  // A prefix test is not enough: "/Web-notes/secret" shares the prefix "/Web".
+  const target = resolve(WEB_DIR, relative);
+  const inside = relative_(WEB_DIR, target);
+  if (inside.startsWith('..') || isAbsolute(inside)) {
+    response.writeHead(403, { 'content-type': 'text/plain' });
+    return response.end('no');
+  }
+
+  const exists = existsSync(target) && statSync(target).isFile();
+  if (!exists && extname(relative)) {
+    // A missing file with an extension is a missing file — only the app's own
+    // routes (no extension) fall back to the page itself.
+    response.writeHead(404, { 'content-type': 'text/plain' });
+    return response.end('not found');
+  }
+  const file = exists ? target : join(WEB_DIR, 'index.html');
   try {
     const body = readFileSync(file);
     response.writeHead(200, {
@@ -917,10 +1322,7 @@ function startCompanionServer(httpsPort) {
       response.writeHead(200, { 'content-type': MIME['.mobileconfig'], 'content-length': body.length });
       return response.end(body);
     }
-    if (url.pathname === '/install') {
-      const host = (request.headers.host || '').split(':')[0];
-      return installPage(response, 'http', `https://${host}:${httpsPort}/`);
-    }
+    if (url.pathname === '/install') return installPage(response, 'http', appUrlFor(request));
     // Everything else belongs on the trusted address.
     const host = (request.headers.host || '').split(':')[0];
     response.writeHead(302, { location: `https://${host}:${httpsPort}${url.pathname}${url.search}` });
@@ -929,7 +1331,40 @@ function startCompanionServer(httpsPort) {
   return listen(companion, httpsPort + 1, 4).catch(() => null);
 }
 
+/** The commands that are about paired devices rather than running the app. */
+function handleDeviceCommands() {
+  if (process.argv.includes('--devices')) {
+    if (pairing.devices.length === 0) console.log('no phones paired yet');
+    for (const device of pairing.devices) {
+      const seen = device.lastSeen ? new Date(device.lastSeen).toLocaleString() : 'never used';
+      console.log(`${device.id}  ${device.name.padEnd(16)} paired ${new Date(device.pairedAt).toLocaleDateString()}  last used ${seen}`);
+    }
+    process.exit(0);
+  }
+  const revokeIndex = process.argv.indexOf('--revoke');
+  if (revokeIndex >= 0) {
+    const wanted = process.argv[revokeIndex + 1];
+    if (!wanted) {
+      console.error('usage: node companion/server.mjs --revoke <device id | all>');
+      process.exit(1);
+    }
+    if (wanted === 'all') {
+      const count = pairing.devices.length;
+      pairing.devices = [];
+      savePairing();
+      console.log(count ? `revoked ${count} device(s)` : 'no phones were paired');
+      process.exit(0);
+    }
+    const removed = revokeDevice(wanted);
+    console.log(removed ? `revoked ${wanted}` : `no device called ${wanted} (see --devices)`);
+    process.exit(removed ? 0 : 1);
+  }
+}
+
+handleDeviceCommands();
+
 const port = await listen(server, PORT);
+appPort = port;
 const scheme = certificates ? 'https' : 'http';
 const short = hostname().replace(/\.local$/i, '');
 const link = `${scheme}://${short}.local:${port}/`;
@@ -937,18 +1372,28 @@ const companionPort = certificates ? await startCompanionServer(port) : null;
 
 const lines = ["Buddy's phone app is ready:"];
 if (companionPort) {
-  const setup = `http://${short}.local:${companionPort}/install`;
+  // The setup page, over plain HTTP (iOS will not fetch a profile over the
+  // HTTPS it is supposed to protect) and carrying the one-time pairing code.
+  const setup = `http://${short}.local:${companionPort}/install?pair=${pairing.setupSecret}`;
   lines.push(
     '',
     `   1. On the phone (same Wi-Fi), open:   ${setup}`,
-    '      That page installs the little certificate he needs, then turns on his microphone.',
-    `   2. Then add him to the home screen:   ${link}`
+    '      That page installs the little certificate he needs, then pairs the phone.',
+    `   2. Then add him to the home screen:    ${link}`
   );
   await printQRCode(setup);
 } else {
-  lines.push('', `   Open this on your phone (same Wi-Fi):   ${link}`, '   Then Share -> Add to Home Screen.');
-  await printQRCode(link);
+  const setup = `${link}?pair=${pairing.setupSecret}`;
+  lines.push('', `   Open this on your phone (same Wi-Fi):   ${setup}`, '   Then Share -> Add to Home Screen.');
+  await printQRCode(setup);
 }
+lines.push(
+  '',
+  pairing.devices.length === 0
+    ? 'No phones paired yet — the link above is the only way in, and it works once.'
+    : `${pairing.devices.length} phone(s) paired. Pair another with the link above, or list them with --devices.`,
+  'Revoke a phone any time:  node companion/server.mjs --revoke <id|all>'
+);
 if (DEMO) lines.push('', 'Demo mode is ON: no Mac needed, he does faces and answers from a script.');
 else lines.push('', 'He finds your Mac on his own when the Buddy app is running.');
 if (!certificates) lines.push('', 'Plain HTTP: the face and buttons work; iPhone will not give a web page the microphone.');
@@ -959,7 +1404,7 @@ console.log(`\n\u001b[35m${lines.join('\n')}\u001b[0m\n`);
 // the microphone works there as well). --no-open keeps him out of the way.
 if (process.platform === 'darwin' && !process.argv.includes('--no-open')) {
   try {
-    execFileSync('open', [`${scheme}://localhost:${port}/`], { stdio: 'ignore' });
+    execFileSync('open', [`${scheme}://localhost:${port}/${validSetupSecret(pairing.setupSecret) ? `?pair=${pairing.setupSecret}` : ''}`], { stdio: 'ignore' });
   } catch {
     /* nothing to open with; the addresses above are enough */
   }

@@ -46,6 +46,9 @@ const state = {
   hostId: null,
   deviceId: getDeviceId(),
   deviceName: deviceLabel(),
+  deviceToken: getDeviceToken(),
+  paired: Boolean(getDeviceToken()),
+  pairing: false,
   live: null,
   session: null,
   settings: null,
@@ -101,11 +104,18 @@ function chirp(kind = 'up') {
  */
 function connectToMac() {
   state.events?.close();
+  if (!state.deviceToken) {
+    // Unpaired: the stream would only be refused. Point at the setup link.
+    setStatus('offline', 'Not paired');
+    face.setMood('sleepy');
+    showPairingHelp();
+    return;
+  }
   setStatus('connecting', 'Finding your computer…');
 
   let events;
   try {
-    events = new EventSource('./api/events');
+    events = new EventSource(state.deviceToken ? `./api/events?token=${encodeURIComponent(state.deviceToken)}` : './api/events');
   } catch {
     setTimeout(connectToMac, 2000);
     return;
@@ -122,7 +132,9 @@ function connectToMac() {
     setStatus('ready', 'Connected');
     hideOverlay();
     if (wasOffline) chirp('up');
-    requestSession().catch(() => undefined);
+    // What the computer knows about him — his voice, his model — without
+    // asking for a credential yet. That wait happens at the press.
+    requestInfo().catch(() => undefined);
   };
 
   events.onmessage = (event) => {
@@ -137,6 +149,14 @@ function connectToMac() {
   };
 
   events.onerror = () => {
+    if (!state.deviceToken) {
+      // No token: the bridge will not open the stream. Say what to do about it
+      // instead of hammering a locked door.
+      state.events?.close();
+      state.events = null;
+      showPairingHelp();
+      return;
+    }
     // EventSource reconnects by itself while the page is open. Only when it
     // gives up entirely do we rebuild the stream, so a sleeping laptop or a
     // walk out of Wi-Fi range heals on its own without flashing an overlay.
@@ -174,11 +194,7 @@ function send(packet) {
     .catch(() => undefined)
     .then(async () => {
       try {
-        const response = await fetch('./api/send', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(packet)
-        });
+        const response = await api('./api/send', { method: 'POST', body: JSON.stringify(packet) });
         if (response.ok) state.connectedToMac = true;
         return response.ok;
       } catch {
@@ -188,12 +204,49 @@ function send(packet) {
   return state.outbox;
 }
 
-/** Ask the bridge/Mac for a fresh, short-lived voice credential. */
-async function requestSession() {
-  const response = await fetch('./api/session', {
+/**
+ * Talk to the bridge, with this phone's paired-device token attached.
+ *
+ * The bridge only answers a device it has been introduced to — the token is
+ * what says "this is the phone the user paired", and it never leaves the phone
+ * except in this header. A 401 means the phone was revoked (or never paired),
+ * which is worth explaining on screen rather than retrying forever.
+ */
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
+      ...(state.deviceToken ? { authorization: `Bearer ${state.deviceToken}` } : {}),
+      ...(options.headers || {})
+    }
+  });
+  if (response.status === 401 || response.status === 403) {
+    state.paired = false;
+    const detail = await response.json().catch(() => ({}));
+    const error = new Error(detail.error || 'This phone is no longer paired with your computer.');
+    error.pairing = true;
+    showPairingHelp(detail.hint);
+    throw error;
+  }
+  return response;
+}
+
+/**
+ * Ask the bridge for a fresh voice credential, for one named model, at the
+ * last possible moment — the window in which a token can start a session is
+ * about a minute, so anything fetched earlier is worthless by the time the
+ * user presses the screen.
+ */
+async function requestSession(model = null) {
+  const response = await api('./api/session', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ device: state.deviceId, name: state.deviceName, wants: state.voiceOut ? 'audio' : 'text' })
+    body: JSON.stringify({
+      model: model || undefined,
+      device: state.deviceId,
+      name: state.deviceName,
+      wants: state.voiceOut ? 'audio' : 'text'
+    })
   });
   if (!response.ok) {
     const detail = await response.json().catch(() => ({}));
@@ -205,6 +258,74 @@ async function requestSession() {
   if (payload.host?.name) state.hostName = payload.host.name;
   applySettingsToUi();
   return payload;
+}
+
+/** What the computer knows about him, without starting any token's clock. */
+async function requestInfo() {
+  if (!state.deviceToken) return null;
+  const response = await api('./api/info').catch(() => null);
+  if (!response?.ok) return null;
+  const info = await response.json().catch(() => null);
+  if (!info) return null;
+  state.settings = info.settings || state.settings;
+  if (info.host?.name) state.hostName = info.host.name;
+  applySettingsToUi();
+  return info;
+}
+
+/**
+ * Pairing: the user scans a code the bridge printed, so this page arrives with
+ * ?pair=<secret>. Trading it here, once, is what makes this phone *this user's*
+ * phone — and it is what keeps someone else on the same Wi-Fi out.
+ */
+async function pairFromUrl() {
+  const url = new URL(window.location.href);
+  const secret = url.searchParams.get('pair');
+  if (!secret || state.pairing) return false;
+  state.pairing = true;
+  setStatus('connecting', 'Pairing with your computer…');
+  try {
+    const response = await fetch('./api/pair', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret, name: state.deviceName })
+    });
+    const detail = await response.json().catch(() => ({}));
+    if (!response.ok || !detail.token) {
+      state.pairing = false;
+      showOverlay('That pairing link did not work', detail.error || 'Ask the computer for a fresh one.', 'Try again', () => pairFromUrl());
+      return false;
+    }
+    state.deviceToken = detail.token;
+    state.paired = true;
+    localStorage.setItem('buddy.token', detail.token);
+    state.deviceId = detail.device?.id || state.deviceId;
+    localStorage.setItem('buddy.device', state.deviceId);
+    // Keep the secret out of the address bar (and out of any bookmark, history
+    // or screenshot) now that it has been spent.
+    url.searchParams.delete('pair');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    chirp('up');
+    setStatus('ready', 'Paired');
+    hideOverlay();
+    return true;
+  } catch (error) {
+    state.pairing = false;
+    showOverlay('Could not reach your computer', error.message || 'Check that you are on the same Wi-Fi.', 'Try again', () => pairFromUrl());
+    return false;
+  }
+}
+
+function showPairingHelp(hint) {
+  showOverlay(
+    'This phone is not paired',
+    hint || 'Open the setup link the Buddy bridge printed (or scan its QR code) to pair this phone.',
+    'Pair again',
+    () => {
+      if (!state.deviceToken) window.location.reload();
+      else setStatus('offline', 'Not paired');
+    }
+  );
 }
 
 // ── Packets from the computer ───────────────────────────────────────────────
@@ -329,7 +450,10 @@ async function wake() {
   setStatus('ready', 'Waking up…');
 
   try {
-    const session = state.session?.live ? state.session : await requestSession();
+    // A credential is asked for *now*, in the same breath as connecting: the
+    // one the page fetched when it loaded is long past its window, and a
+    // single-use token that was already tried cannot be used again.
+    const session = await requestSession();
     if (!session.live) {
       // No realtime provider: the computer can still do everything, but the
       // talking has to happen on-device.
@@ -405,7 +529,14 @@ async function startRealtime(live) {
     await voice.connect({
       token: live.token,
       wsUrl: live.wsUrl,
+      // The session the token is pinned to, when the bridge sent one: sending
+      // exactly this is what makes a constrained token work.
+      setup: live.setup,
       session: live.session,
+      newSessionExpiresAt: live.newSessionExpiresAt,
+      // Every retry inside connect() asks for its own fresh credential, for
+      // the model it is about to try — never a used one.
+      mint: (model) => requestSession(model),
       voiceOut: state.voiceOut,
       pushToTalk: !state.handsFree,
       ambient: true
@@ -425,10 +556,14 @@ function reconnectSoon() {
   reconnectTimer = setTimeout(async () => {
     if (!state.awake) return;
     try {
+      // A reconnect after a drop gets a brand-new credential too: the old one
+      // was either spent on the session that just ended or is past its window.
       const session = await requestSession();
       if (session.live) await startRealtime(session.live);
-    } catch {
-      /* the next wake will try again */
+      else startLocalVoice();
+    } catch (error) {
+      setStatus('offline', error.message || 'Voice stopped');
+      face.setMood('error');
     }
   }, 1200);
 }
@@ -499,7 +634,7 @@ function startLocalVoice() {
 async function askLocally(text) {
   face.setMood('thinking');
   try {
-    const response = await fetch('./api/chat', {
+    const response = await api('./api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, device: state.deviceId })
@@ -651,7 +786,7 @@ function renderSettings() {
     ['Computer use', settings.computerUse === false ? 'off — he can look and point only' : 'on'],
     ['Memories', `${(settings.memoryCount ?? 0)} saved`],
     ['Simulate mode', settings.simulated ? 'yes — a pretend screen' : 'no — real screen'],
-    ['Voice session', state.session?.live ? state.session.live.session?.model || 'ready' : 'not connected']
+    ['Voice session', state.session?.live ? state.session.live.setup?.model || state.session.live.session?.model || state.session.live.model || 'ready' : 'not connected']
   ];
   els.settingsBody.innerHTML = rows
     .map(
@@ -662,10 +797,51 @@ function renderSettings() {
     'beforeend',
     `<div class="row"><span class="label">Personality</span><span class="value">edit it on the computer — he keeps one personality everywhere</span></div>`
   );
+  els.settingsBody.insertAdjacentHTML(
+    'beforeend',
+    `<div class="row"><span class="label">This phone</span><span class="value">${
+      state.paired ? `paired with ${escapeHtml(state.hostName)}` : 'not paired'
+    } <button class="link" id="unpair">${state.paired ? 'unpair' : 'how to pair'}</button></span></div>`
+  );
+  document.getElementById('unpair')?.addEventListener('click', () => {
+    if (!state.paired) {
+      showPairingHelp();
+      return;
+    }
+    if (!window.confirm('Forget the computer on this phone? You will have to scan the setup code again.')) return;
+    // The bridge is told as well, so the token is dead on both sides.
+    api('./api/unpair', { method: 'POST' }).catch(() => undefined);
+    forgotComputer();
+  });
+}
+
+/** Forget the computer on this phone: no token, no stream, no credentials. */
+function forgotComputer() {
+  state.paired = false;
+  state.deviceToken = '';
+  try {
+    localStorage.removeItem('buddy.token');
+  } catch {
+    /* nothing to forget */
+  }
+  endSession();
+  state.events?.close();
+  state.events = null;
+  face.setMood('sleepy');
+  setStatus('offline', 'Not paired');
+  showPairingHelp();
 }
 
 const escapeHtml = (value) =>
   value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+
+function getDeviceToken() {
+  try {
+    return localStorage.getItem('buddy.token') || '';
+  } catch {
+    return ''; // private mode: he still works, the phone just has to pair each visit
+  }
+}
 
 function getDeviceId() {
   let id = localStorage.getItem('buddy.device');
@@ -687,10 +863,11 @@ function deviceLabel() {
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 
-function boot() {
+async function boot() {
   bindGestures();
   setStatus('connecting', 'Looking for your computer…');
   face.setMood('sleepy');
+  await pairFromUrl();
   connectToMac();
 
   // Keep the shell cached so tapping his icon shows his face immediately, even

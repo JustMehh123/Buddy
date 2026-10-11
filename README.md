@@ -45,7 +45,8 @@ QR code. Then, **once**:
 1. **Get a free key** at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
    (any Google account, no card) and paste it when Buddy asks.
 2. **Scan the QR code** with your phone's camera — the Mac and the phone must be
-   on the same Wi-Fi.
+   on the same Wi-Fi. The link it opens carries a one-time code that pairs *this*
+   phone with *your* Mac; nothing else on the network can reach him.
 3. On the page that opens, tap **Install the Buddy certificate**, then do the two
    quick steps it shows in **Settings** (profile → install, then full trust).
    This is what lets a web page use the microphone; it never leaves your Wi-Fi.
@@ -100,6 +101,14 @@ ever outgrow it, swapping in a paid key is a one-line change in
   in his menu, or `GEMINI_API_KEY=… ./start.sh`.
 - **A new Wi-Fi or IP** — `node companion/server.mjs --regen-certs`, then
   reinstall the profile on the phone.
+- **A phone that was paired no longer works** — it was revoked, or the bridge
+  restarted with a new pairing code. `node companion/server.mjs --devices` lists
+  the phones; `--revoke <id|all>` cuts one off; the phone's gear menu can unpair
+  itself.
+- **"This phone is not paired"** — the bridge prints a fresh one-time link every
+  time it starts; open that link on the phone. `node companion/server.mjs
+  --devices` lists the phones that are paired, and `--revoke <id|all>` cuts one
+  off (the phone's gear menu can unpair it too).
 - **Port already in use** — he moves to the next free port and prints it.
 - **He talks with a phone voice** — that is the fallback when the realtime voice
   cannot be reached, almost always a missing or rejected key.
@@ -113,6 +122,7 @@ Mac/Sources/BuddyMac/   the menu-bar app: host, tools, screen reading, cursor
 Shared/                 the packet format both halves agree on (+ the fonts)
 Web/                    the phone website (face, live voice, gestures)
 companion/              the bridge that serves Web/ and finds the Mac
+.github/workflows/      the checks that run on every push (no API key needed)
 scripts/build-mac.sh    builds and signs build/Buddy.app
 docs/                   screenshots from the original project
 experiments/            parked, unfinished side work — safe to ignore
