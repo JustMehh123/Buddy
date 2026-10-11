@@ -1,0 +1,33 @@
+{
+  "name": "@buddy/host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Buddy's host: owns the API key, discovers and pairs with the phone, mints short-lived realtime tokens and does the seeing/doing on your computer.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "buddy": "./bin/buddy.js"
+  },
+  "scripts": {
+    "build": "tsc -b && node scripts/copy-web.mjs",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "@buddy/core": "*",
+    "@buddy/protocol": "*",
+    "bonjour-service": "^1.3.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2"
+  }
+}

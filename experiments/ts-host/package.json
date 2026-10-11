@@ -1,0 +1,33 @@
+{
+  "name": "buddy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Buddy — a little computer companion. iOS app + desktop app. Talks on your phone, sees and does on your computer.",
+  "license": "Unlicense",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/host",
+    "apps/companion",
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n host,web -c magenta,cyan \"npm:dev:host\" \"npm:dev:web\"",
+    "dev:host": "npm run dev -w @buddy/host",
+    "dev:web": "npm run dev -w @buddy/companion",
+    "build": "npm run build -w @buddy/protocol && npm run build -w @buddy/core && npm run build -w @buddy/companion && npm run build -w @buddy/host",
+    "start": "npm run build && npm run start -w @buddy/host",
+    "host": "npm run start -w @buddy/host",
+    "desktop": "npm run start -w @buddy/desktop",
+    "typecheck": "tsc -b packages/protocol packages/core apps/host apps/desktop --pretty && npm run typecheck -w @buddy/companion",
+    "test": "node --test packages/*/test/*.test.js apps/host/test/*.test.js",
+    "clean": "rm -rf packages/*/dist apps/*/dist apps/companion/dist"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

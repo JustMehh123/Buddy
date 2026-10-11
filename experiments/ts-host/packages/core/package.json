@@ -1,0 +1,23 @@
+{
+  "name": "@buddy/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Buddy's soul: the face renderer, personality, memory, prompts and safety rules. Shared by every app.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch --preserveWatchOutput"
+  },
+  "dependencies": {
+    "@buddy/protocol": "*"
+  }
+}

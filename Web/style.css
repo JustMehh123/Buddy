@@ -1,0 +1,427 @@
+/*
+ * Buddy on the phone.
+ *
+ * Dark, calm and out of the way: he is the interface. The palette is the same
+ * one the Mac uses for his cursor and menu bar, so both halves of him match.
+ */
+
+@font-face {
+  font-family: 'Fredoka';
+  src: url('./fonts/Fredoka.ttf') format('truetype');
+  font-weight: 300 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./fonts/IBMPlexSans.ttf') format('truetype');
+  font-weight: 100 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('./fonts/IBMPlexMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --berry1: #a9bcff;
+  --berry2: #6c86f5;
+  --berry3: #4254d6;
+  --berry4: #2b2f8f;
+  --ink: #0b0d17;
+  --ink-soft: #b9b2cc;
+  --panel: #161a2c;
+  --panel-soft: #1e2338;
+  --line: rgba(169, 188, 255, 0.14);
+  --good: #7ce3a8;
+  --warn: #ffd479;
+  --bad: #ff8a8a;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--ink);
+  color: #eef1ff;
+  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#surface {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  touch-action: manipulation;
+}
+
+/* The slow aurora behind him: something to look at while he thinks. */
+.aurora {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(38% 30% at 22% 18%, rgba(108, 134, 245, 0.35), transparent 70%),
+    radial-gradient(42% 34% at 80% 26%, rgba(66, 84, 214, 0.32), transparent 72%),
+    radial-gradient(50% 40% at 50% 88%, rgba(43, 47, 143, 0.45), transparent 70%);
+  filter: blur(10px);
+  animation: drift 26s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.06);
+  }
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────────────── */
+
+#topbar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: calc(var(--safe-top) + 0.9rem) 1.1rem 0.4rem;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.names {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.names strong {
+  font-family: 'Fredoka', system-ui, sans-serif;
+  font-size: 1.12rem;
+  letter-spacing: 0.01em;
+}
+
+.names small {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60vw;
+}
+
+#status-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 4px rgba(255, 212, 121, 0.14);
+  flex: none;
+}
+#status-dot[data-kind='ready'] {
+  background: var(--good);
+  box-shadow: 0 0 0 4px rgba(124, 227, 168, 0.14);
+}
+#status-dot[data-kind='connecting'] {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+#status-dot[data-kind='offline'],
+#status-dot[data-kind='error'] {
+  background: var(--bad);
+  box-shadow: 0 0 0 4px rgba(255, 138, 138, 0.14);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.controls {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.9rem;
+  border: 1px solid var(--line);
+  background: rgba(22, 26, 44, 0.6);
+  color: var(--berry1);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.2s ease;
+}
+.icon-button:active {
+  transform: scale(0.94);
+}
+.icon-button svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+/* ── The face ────────────────────────────────────────────────────────────── */
+
+#stage {
+  position: relative;
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
+#face {
+  width: min(84vw, 62vh);
+  height: min(84vw, 62vh);
+  filter: drop-shadow(0 30px 60px rgba(43, 47, 143, 0.55));
+}
+
+#bubble {
+  position: absolute;
+  left: 50%;
+  bottom: 8%;
+  transform: translate(-50%, 12px) scale(0.94);
+  max-width: min(80vw, 32rem);
+  padding: 0.85rem 1.1rem;
+  border-radius: 1.25rem;
+  border: 1px solid var(--line);
+  background: rgba(22, 26, 44, 0.92);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+#bubble.visible {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+#bubble p {
+  margin: 0;
+  font-size: 1.02rem;
+  line-height: 1.45;
+}
+
+#hint {
+  position: absolute;
+  left: 50%;
+  bottom: 2%;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: 78vw;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+#hint.visible {
+  opacity: 1;
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+
+#footer {
+  position: relative;
+  z-index: 3;
+  padding: 0 1rem calc(var(--safe-bottom) + 1.1rem);
+  text-align: center;
+}
+.tip {
+  margin: 0;
+  color: rgba(185, 178, 204, 0.72);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+
+/* ── Sheets (overlay + settings) ─────────────────────────────────────────── */
+
+#overlay,
+#settings {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  align-items: end;
+  background: rgba(6, 8, 16, 0.72);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.24s ease;
+}
+#overlay.visible,
+#settings.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#overlay .sheet,
+#settings .sheet {
+  width: 100%;
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.35rem calc(var(--safe-bottom) + 1.6rem);
+  border-radius: 1.6rem 1.6rem 0 0;
+  border: 1px solid var(--line);
+  border-bottom: none;
+  background: linear-gradient(180deg, var(--panel) 0%, #12162a 100%);
+  transform: translateY(18px);
+  transition: transform 0.24s ease;
+}
+#overlay.visible .sheet,
+#settings.visible .sheet {
+  transform: translateY(0);
+}
+
+#overlay h2,
+#settings h2 {
+  margin: 0 0 0.5rem;
+  font-family: 'Fredoka', system-ui, sans-serif;
+  font-size: 1.35rem;
+}
+
+#overlay p {
+  margin: 0 0 1.2rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+  font-size: 0.95rem;
+}
+
+.primary {
+  width: 100%;
+  padding: 0.9rem 1rem;
+  border: none;
+  border-radius: 1rem;
+  background: linear-gradient(135deg, var(--berry2), var(--berry3));
+  color: white;
+  font-family: 'Fredoka', system-ui, sans-serif;
+  font-size: 1.02rem;
+  cursor: pointer;
+}
+.primary:active {
+  transform: scale(0.99);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+#settings-body .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.88rem;
+}
+#settings-body .label {
+  color: var(--ink-soft);
+  flex: none;
+}
+#settings-body .value {
+  text-align: right;
+  color: #e9edff;
+}
+
+.sheet-group {
+  margin-top: 1rem;
+  border-radius: 1rem;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--panel-soft);
+  font-size: 0.95rem;
+  border-bottom: 1px solid var(--line);
+}
+.switch:last-child {
+  border-bottom: none;
+}
+
+.switch input {
+  appearance: none;
+  width: 2.8rem;
+  height: 1.65rem;
+  border-radius: 999px;
+  background: #2c3350;
+  position: relative;
+  transition: background 0.18s ease;
+  cursor: pointer;
+  flex: none;
+}
+.switch input::after {
+  content: '';
+  position: absolute;
+  top: 0.2rem;
+  left: 0.2rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: #dfe3ff;
+  transition: transform 0.18s ease;
+}
+.switch input:checked {
+  background: var(--berry2);
+}
+.switch input:checked::after {
+  transform: translateX(1.15rem);
+}
+
+.fineprint {
+  margin: 1rem 0 0;
+  color: rgba(185, 178, 204, 0.7);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora {
+    animation: none;
+  }
+  #bubble,
+  .icon-button {
+    transition: none;
+  }
+}
+
+/* Landscape phones: keep his face from swallowing the whole screen. */
+@media (orientation: landscape) and (max-height: 520px) {
+  #face {
+    width: min(52vh, 70vw);
+    height: min(52vh, 70vw);
+  }
+  #footer {
+    display: none;
+  }
+}

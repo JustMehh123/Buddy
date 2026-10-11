@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Buddy</title>
+    <meta name="description" content="Your little companion. He talks on your phone and sees and does things on your computer." />
+    <meta name="theme-color" content="#0b0d17" />
+    <meta name="color-scheme" content="dark" />
+
+    <!-- Add to Home Screen: this is the whole "install" story on a phone -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Buddy" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+    <link rel="icon" href="./icons/favicon.png" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <!-- Everything is the hold surface, exactly like holding the phone screen -->
+    <div id="surface">
+      <div class="aurora" aria-hidden="true"></div>
+
+      <header id="topbar">
+        <div class="status no-hold">
+          <span id="status-dot" data-kind="connecting"></span>
+          <span class="names">
+            <strong id="buddy-name">Buddy</strong>
+            <small id="status">Looking for your computer…</small>
+          </span>
+        </div>
+        <div class="controls no-hold">
+          <button id="gear" class="icon-button" aria-label="Settings" title="Settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.6.1-1-.1-1 2-1.6-2-3.4-2.4 1a7.5 7.5 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7.5 7.5 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6-.1 1 .1 1-2 1.6 2 3.4 2.4-1a7.5 7.5 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.5 7.5 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6Z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
+          <button id="power" class="icon-button" aria-label="Wake or sleep" title="Wake or sleep">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M11 3h2v9h-2V3Zm5.7 1.9 1.4 1.4A8 8 0 1 1 5.9 6.3l1.4-1.4a10 10 0 1 0 9.4 0Z" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="stage">
+        <canvas id="face" aria-label="Buddy's face"></canvas>
+
+        <div id="bubble" role="status" aria-live="polite">
+          <p id="bubble-text"></p>
+        </div>
+
+        <p id="hint" aria-live="polite"></p>
+      </main>
+
+      <footer id="footer">
+        <p class="tip">hold the screen and talk · double tap to wake or nap</p>
+      </footer>
+    </div>
+
+    <!-- Connection / setup overlay -->
+    <section id="overlay" class="no-hold" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <h2 id="overlay-title">Waiting for your computer</h2>
+        <p id="overlay-body"></p>
+        <button id="overlay-action" class="primary">Try again</button>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="settings" class="no-hold" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <div class="sheet-head">
+          <h2>Buddy</h2>
+          <button id="settings-close" class="icon-button" aria-label="Close">✕</button>
+        </div>
+        <div id="settings-body"></div>
+        <div class="sheet-group">
+          <label class="switch">
+            <span>Chirp</span>
+            <input id="toggle-chirp" type="checkbox" checked />
+          </label>
+          <label class="switch">
+            <span>Speak replies out loud</span>
+            <input id="toggle-voice" type="checkbox" />
+          </label>
+          <label class="switch">
+            <span>Hands-free (no holding)</span>
+            <input id="toggle-handsfree" type="checkbox" />
+          </label>
+        </div>
+        <p class="fineprint">
+          Everything he can do — looking at the screen, pointing, clicking, typing, remembering — is decided on your
+          computer, and your API key never comes near this phone.
+        </p>
+      </div>
+    </section>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
