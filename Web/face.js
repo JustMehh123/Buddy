@@ -44,16 +44,16 @@ class Spring {
 
 /** Per-mood expression targets. Numbers are in the 0..1 design space. */
 const MOODS = {
-  listening: { browLift: 0.035, browTilt: 0.05, mouth: 0.05, squint: 0, pupil: 1.0, lids: 0.0, blush: 0.05 },
-  resting: { browLift: 0.005, browTilt: 0.0, mouth: 0.12, squint: 0.15, pupil: 0.92, lids: 0.18, blush: 0.0 },
-  thinking: { browLift: 0.02, browTilt: -0.18, mouth: -0.02, squint: 0.05, pupil: 0.88, lids: 0.05, blush: 0.0, gazeBias: { x: 0.55, y: -0.8 } },
-  talking: { browLift: 0.045, browTilt: 0.03, mouth: 0.25, squint: 0.0, pupil: 1.05, lids: 0.0, blush: 0.1 },
-  pointing: { browLift: 0.06, browTilt: 0.22, mouth: 0.22, squint: 0.0, pupil: 1.02, lids: 0.0, blush: 0.05, gazeBias: { x: 0.75, y: -0.25 } },
-  happy: { browLift: 0.07, browTilt: 0.1, mouth: 0.9, squint: 0.75, pupil: 1.1, lids: 0.0, blush: 0.55 },
-  sleepy: { browLift: -0.01, browTilt: 0.0, mouth: 0.06, squint: 0.2, pupil: 0.8, lids: 0.55, blush: 0.0 },
+  listening: { browLift: 0.05, browTilt: 0.07, mouth: 0.06, squint: 0, pupil: 1.0, lids: 0.0, blush: 0.08 },
+  resting: { browLift: 0.005, browTilt: 0.0, mouth: 0.14, squint: 0.18, pupil: 0.92, lids: 0.2, blush: 0.0 },
+  thinking: { browLift: 0.03, browTilt: -0.26, mouth: -0.02, squint: 0.08, pupil: 0.88, lids: 0.06, blush: 0.0, gazeBias: { x: 0.55, y: -0.8 } },
+  talking: { browLift: 0.06, browTilt: 0.04, mouth: 0.32, squint: 0.0, pupil: 1.05, lids: 0.0, blush: 0.16 },
+  pointing: { browLift: 0.08, browTilt: 0.3, mouth: 0.28, squint: 0.0, pupil: 1.02, lids: 0.0, blush: 0.08, gazeBias: { x: 0.75, y: -0.25 } },
+  happy: { browLift: 0.09, browTilt: 0.14, mouth: 1.0, squint: 0.85, pupil: 1.12, lids: 0.0, blush: 0.7 },
+  sleepy: { browLift: -0.015, browTilt: 0.0, mouth: 0.07, squint: 0.25, pupil: 0.8, lids: 0.65, blush: 0.0 },
   asleep: { browLift: -0.02, browTilt: 0.0, mouth: 0.02, squint: 0.1, pupil: 0.6, lids: 1.0, blush: 0.0 },
-  waking: { browLift: 0.08, browTilt: 0.06, mouth: 0.35, squint: 0.1, pupil: 1.15, lids: 0.1, blush: 0.15 },
-  error: { browLift: 0.0, browTilt: 0.35, mouth: -0.35, squint: 0.0, pupil: 1.0, lids: 0.0, blush: 0.0 }
+  waking: { browLift: 0.1, browTilt: 0.08, mouth: 0.45, squint: 0.12, pupil: 1.15, lids: 0.1, blush: 0.2 },
+  error: { browLift: 0.0, browTilt: 0.45, mouth: -0.45, squint: 0.0, pupil: 1.0, lids: 0.0, blush: 0.0 }
 };
 
 export class BuddyFace {
@@ -117,7 +117,7 @@ export class BuddyFace {
     this.targetMood = mood;
     this.mood = mood;
     this.moodSince = this.t;
-    this.blinkStarted = this.t; // blink through every change of expression
+    // No forced blink here: snapping the eyes shut on every mood change read as flicker.
   }
 
   setTalk(level) {
@@ -189,8 +189,8 @@ export class BuddyFace {
 
     // ── Idle life ───────────────────────────────────────────────────────────
     const breathe = Math.sin(this.t * (this.mood === 'resting' ? 1.1 : 1.8)) * 0.008;
-    if (this.talk < 0.05 && !asleep && !sleepy && Math.random() < dt * 0.35) {
-      this.hop.velocity += 120 + Math.random() * 160;
+    if (this.talk < 0.05 && !asleep && !sleepy && Math.random() < dt * 0.1) {
+      this.hop.velocity += 50 + Math.random() * 70;
     }
 
     const browTarget = shape.browLift + breathe * 0.4;
@@ -217,8 +217,8 @@ export class BuddyFace {
     const size = Math.min(width, height);
     const cx = width / 2;
     const cy = height / 2;
-    // The blob occupies 86% of the canvas, leaving room for brows and hops.
-    const scale = size * 0.86;
+    // The blob fills 95% of the canvas: eyes and mouth big, expressions readable.
+    const scale = size * 0.95;
     const hopOffset = -this.hop.value * scale * 0.18;
 
     ctx.save();
@@ -297,8 +297,8 @@ export class BuddyFace {
   }
 
   drawEyes(ctx) {
-    const eye = { y: -0.06, dx: 0.175 };
-    const radius = { x: 0.135, y: 0.155 };
+    const eye = { y: -0.05, dx: 0.19 };
+    const radius = { x: 0.16, y: 0.185 };
     const lids = this.lids.value;
     const squint = this.squint.value;
     const gazeX = this.gaze.x;
@@ -323,7 +323,7 @@ export class BuddyFace {
       const maxY = radius.y * 0.38;
       const px = ex + gazeX * maxX;
       const py = ey + gazeY * maxY;
-      const pr = 0.062 * pupilScale;
+      const pr = 0.075 * pupilScale;
 
       ctx.save();
       ctx.beginPath();
@@ -362,9 +362,9 @@ export class BuddyFace {
     const lift = this.brow.value;
     const tilt = this.tilt.value;
     for (const side of [-1, 1]) {
-      const ex = side * 0.175;
-      const ey = -0.245 - lift - (this.mood === 'listening' ? Math.max(0, this.talk) * 0.03 : 0);
-      const width = 0.13;
+      const ex = side * 0.19;
+      const ey = -0.255 - lift - (this.mood === 'listening' ? Math.max(0, this.talk) * 0.03 : 0);
+      const width = 0.15;
       const wobble = this.mood === 'thinking' && side === 1 ? -0.25 : 0;
       ctx.save();
       ctx.translate(ex, ey);
@@ -372,7 +372,7 @@ export class BuddyFace {
       ctx.beginPath();
       ctx.moveTo(-width / 2, 0);
       ctx.quadraticCurveTo(0, -0.03, width / 2, 0);
-      ctx.lineWidth = 0.028;
+      ctx.lineWidth = 0.034;
       ctx.lineCap = 'round';
       ctx.strokeStyle = 'rgba(23,21,31,0.82)';
       ctx.stroke();
@@ -397,8 +397,8 @@ export class BuddyFace {
 
     if (this.talk > 0.06 || this.mood === 'talking') {
       // An open, rounded mouth while he speaks; the height follows his voice.
-      const height = 0.035 + openness * 0.075;
-      const width = 0.062 + smile * 0.03;
+      const height = 0.045 + openness * 0.095;
+      const width = 0.08 + smile * 0.04;
       ctx.beginPath();
       ctx.ellipse(0, 0.235 + height * 0.25, width, height, 0, 0, Math.PI * 2);
       ctx.fillStyle = 'rgba(36,16,66,0.92)';
@@ -414,8 +414,8 @@ export class BuddyFace {
     if (smile > 0.55) {
       // Big happy grin
       ctx.beginPath();
-      ctx.moveTo(-0.075, 0.215);
-      ctx.quadraticCurveTo(0, 0.335, 0.075, 0.215);
+      ctx.moveTo(-0.095, 0.21);
+      ctx.quadraticCurveTo(0, 0.35, 0.095, 0.21);
       ctx.closePath();
       ctx.fillStyle = 'rgba(36,16,66,0.9)';
       ctx.fill();
@@ -436,9 +436,9 @@ export class BuddyFace {
 
     // Neutral friendly curve
     ctx.beginPath();
-    ctx.moveTo(-0.048, 0.238);
-    ctx.quadraticCurveTo(0, 0.272 + smile * 0.02, 0.048, 0.238);
-    ctx.lineWidth = 0.019;
+    ctx.moveTo(-0.06, 0.238);
+    ctx.quadraticCurveTo(0, 0.276 + smile * 0.025, 0.06, 0.238);
+    ctx.lineWidth = 0.024;
     ctx.lineCap = 'round';
     ctx.strokeStyle = 'rgba(23,21,31,0.78)';
     ctx.stroke();
@@ -448,13 +448,13 @@ export class BuddyFace {
     const amount = Math.min(0.7, this.blush.value);
     if (amount <= 0.02) return;
     for (const side of [-1, 1]) {
-      const x = side * 0.275;
-      const y = 0.145;
-      const gradient = ctx.createRadialGradient(x, y, 0.005, x, y, 0.075);
-      gradient.addColorStop(0, `rgba(255,150,180,${0.55 * amount})`);
+      const x = side * 0.3;
+      const y = 0.15;
+      const gradient = ctx.createRadialGradient(x, y, 0.005, x, y, 0.09);
+      gradient.addColorStop(0, `rgba(255,150,180,${0.6 * amount})`);
       gradient.addColorStop(1, 'rgba(255,150,180,0)');
       ctx.beginPath();
-      ctx.ellipse(x, y, 0.075, 0.05, 0, 0, Math.PI * 2);
+      ctx.ellipse(x, y, 0.09, 0.06, 0, 0, Math.PI * 2);
       ctx.fillStyle = gradient;
       ctx.fill();
     }

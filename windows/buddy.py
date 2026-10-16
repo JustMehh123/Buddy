@@ -88,7 +88,9 @@ TOOL_GUIDE = (
     "with no words before it (the one exception is web_research, described "
     "below). Never write things like \"one moment\", \"sure\", \"okay\" or "
     "\"let me\". Reply only after, in one short line. No lists, no markdown, "
-    "never mention ids or coordinates.\n\n"
+    "never mention ids or coordinates. The tool call IS the pointing and the doing, so "
+    "never write placeholders like {point to this} or [clicks it] in your reply — "
+    "just answer in plain words after calling.\n\n"
     "Point whenever you can. If the question is about anything on the screen "
     "(\"what's this?\", \"what does this mean?\"), call look_at_screen, then "
     "point_at (or point_at_spot) the thing you're talking about, then give "
@@ -603,6 +605,20 @@ def grid_to_pixels(x, y):
     return min(max(x / 1000, 0), 1) * snap["w"], min(max(y / 1000, 0), 1) * snap["h"]
 
 
+def show_point(cx, cy):
+    """Point visibly: remember the spot AND move the real cursor there.
+
+    The Mac has its own animated cursor overlay; on Windows the honest, visible
+    equivalent is the system pointer gliding to the target, so "point at X"
+    is something you can actually see. Never raises: headless/no-control setups
+    just keep the remembered spot."""
+    _state["point"] = (cx, cy)
+    try:
+        _pyautogui().moveTo(cx, cy, duration=0.25)
+    except Exception:
+        pass
+
+
 def resolve_spot(args):
     """Turn {target_id | x,y} into pixels, like the Mac runAction does."""
     snap = _state["snapshot"]
@@ -830,7 +846,7 @@ def run_tool(name, arguments):
         if target_id not in snap["targets"]:
             return "No target %s. Use an id from the last look_at_screen." % target_id, None
         cx, cy, text = snap["targets"][target_id]
-        _state["point"] = (cx, cy)
+        show_point(cx, cy)
         return 'Pointing at "%s".' % text, None
     if name == "point_at_spot":
         try:
@@ -838,7 +854,8 @@ def run_tool(name, arguments):
             y = float(args["y"])
         except Exception:
             return "Give x and y.", None
-        _state["point"] = grid_to_pixels(x, y)
+        gx, gy = grid_to_pixels(x, y)
+        show_point(gx, gy)
         return "Pointing there.", None
     if name == "stop_pointing":
         _state["point"] = None
