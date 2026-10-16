@@ -1139,7 +1139,10 @@ def main():
         print("Tip: pip install zeroconf for Bonjour, or point the bridge here with")
         print("     BUDDY_HOST=%s BUDDY_PORT=%d" % (_local_ip(), PORT))
     if not ok:
-        print("Start Ollama (`ollama serve`) and pull a model (`ollama pull %s`)." % MODEL)
+        if PROVIDER == "ollama":
+            print("Start Ollama (`ollama serve`) and pull a model (`ollama pull %s`)." % MODEL)
+        else:
+            print("Check BUDDY_API_KEY for %s (and the network), then restart Buddy." % PROVIDER)
 
     try:
         while True:
