@@ -49,11 +49,12 @@ const CERT_DIR = process.env.BUDDY_CERT_DIR || join(HERE, '.certs');
 //
 //   BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... node companion/server.mjs
 //
-// Groq's free tier runs 70B-class models at hundreds of tokens/sec: much
-// smarter and faster than the 3B local default, for one free key.
+// Groq's free tier runs openai/gpt-oss-120b (flagship open-weight model,
+// ~500 tok/sec): much smarter and faster than the 3B local default,
+// for one free key.
 const PROVIDERS = {
   ollama: { base: null, model: 'llama3.2' },
-  groq: { base: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+  groq: { base: 'https://api.groq.com/openai/v1', model: 'openai/gpt-oss-120b' },
   gemini: { base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.8-flash' },
   compatible: { base: process.env.BUDDY_API_BASE || '', model: '' }
 };

@@ -59,15 +59,16 @@ PORT = int(os.environ.get("BUDDY_PORT", "8737"))
 
 # Brain providers: local Ollama by default; a free cloud brain when set.
 #
-#     BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... py buddy.py   # fast 70B cloud
+#     BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... py buddy.py   # fast 120B cloud
 #
 # Every provider speaks the same OpenAI-compatible /v1/chat/completions shape
 # with tools, so the conversation loop is untouched. Groq's free tier runs
-# 70B-class models at hundreds of tokens/sec — much smarter and faster than
-# the 3B local default, in exchange for one free key from console.groq.com.
+# openai/gpt-oss-120b (their flagship open-weight model, ~500 tok/sec) —
+# much smarter and faster than the 3B local default, in exchange for one
+# free key from console.groq.com.
 PROVIDERS = {
     "ollama": {"model": "llama3.2"},
-    "groq": {"base": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
+    "groq": {"base": "https://api.groq.com/openai/v1", "model": "openai/gpt-oss-120b"},
     "gemini": {"base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-3.8-flash"},
     "compatible": {"base": None, "model": None},
 }
@@ -1224,7 +1225,7 @@ def selftest():
     provider, base, model, key = provider_config({"BUDDY_PROVIDER": "groq", "BUDDY_API_KEY": "gsk-test"})
     check(provider == "groq" and base == "https://api.groq.com/openai/v1" and key == "gsk-test",
           "Groq preset resolves with key")
-    check(model == "llama-3.3-70b-versatile", "Groq default is the 70B model")
+    check(model == "openai/gpt-oss-120b", "Groq default is the 120B flagship")
     provider, _, _, _ = provider_config({"GROQ_API_KEY": "gsk-test"})
     check(provider == "groq", "a Groq key alone picks Groq")
     provider, _, _, _ = provider_config({"GEMINI_API_KEY": "AIza-test"})

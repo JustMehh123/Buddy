@@ -69,7 +69,7 @@ enum Brain {
         if !defaults.isEmpty { return defaults }
         if let custom = ProcessInfo.processInfo.environment["BUDDY_MODEL"], !custom.isEmpty { return custom }
         switch provider {
-        case "groq": return "llama-3.3-70b-versatile"
+        case "groq": return "openai/gpt-oss-120b"
         case "gemini": return "gemini-3.8-flash"
         default: return "llama3.2"
         }

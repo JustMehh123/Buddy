@@ -111,8 +111,9 @@ else changes.
 ### Want him smarter *and* faster? (free cloud brain)
 
 Local 3B models are honest but dim and slow. [Groq](https://console.groq.com)
-runs 70B-class models (default: `llama-3.3-70b-versatile`) at hundreds of
-tokens per second on a genuinely free tier — one free key, no card:
+runs OpenAI's flagship open-weight model (default: `openai/gpt-oss-120b`,
+120B params at ~500 tokens/sec) on a genuinely free tier — one free key,
+no card:
 
 1. Sign in at [console.groq.com](https://console.groq.com) and create an API key.
 2. Set two variables (Windows: `setx BUDDY_PROVIDER groq` and

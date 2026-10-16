@@ -42,8 +42,8 @@ DuckDuckGo (research), Tesseract (text ids, optional). No key, no account.
 ## Free cloud brain: smarter and faster (optional)
 
 `llama3.2` on your own PC is private and unlimited, but a 3B model is dim
-and slow. [Groq](https://console.groq.com) runs 70B-class models
-(`llama-3.3-70b-versatile`) at hundreds of tokens/sec on a genuinely free
+and slow. [Groq](https://console.groq.com) runs OpenAI's 120B flagship
+(`openai/gpt-oss-120b`, ~500 tokens/sec) on a genuinely free
 tier — one free key, no card:
 
 1. Sign in at [console.groq.com](https://console.groq.com) and create an API key.
