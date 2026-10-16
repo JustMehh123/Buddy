@@ -423,9 +423,9 @@ final class TeardropLayer: CALayer {
 
         ctx.saveGState()
         if glow {
-            ctx.setShadow(offset: .zero, blur: 30 * k, color: NSColor(hex: Palette.berry2, alpha: 0.7).cgColor)
+            ctx.setShadow(offset: .zero, blur: 30 * k, color: NSColor(hex: Palette.violet2, alpha: 0.7).cgColor)
         } else {
-            ctx.setShadow(offset: .zero, blur: 16 * k, color: NSColor(hex: Palette.berry4, alpha: 0.45).cgColor)
+            ctx.setShadow(offset: .zero, blur: 16 * k, color: NSColor(hex: Palette.violet4, alpha: 0.45).cgColor)
         }
         ctx.addPath(path)
         ctx.setFillColor(NSColor.white.cgColor)
@@ -502,8 +502,8 @@ final class CursorView: NSView {
         stringLayer.fillColor = nil
         stringLayer.lineCap = .round
         stringLayer.lineWidth = 2.5
-        stringLayer.strokeColor = NSColor(hex: Palette.berry1, alpha: 0.7).cgColor
-        trailLayer.fillColor = NSColor(hex: Palette.berry2, alpha: 1).cgColor
+        stringLayer.strokeColor = NSColor(hex: Palette.violet1, alpha: 0.7).cgColor
+        trailLayer.fillColor = NSColor(hex: Palette.violet2, alpha: 1).cgColor
         for l in [stringLayer, trailLayer, effects, cursor, bubbles, speech] { root.addSublayer(l) }
 
         cursor.anchorPoint = CGPoint(x: 0, y: 1)  // the tip: top-left corner in y-up space
@@ -520,7 +520,7 @@ final class CursorView: NSView {
             eyes.append((socket, white, pupil))
         }
 
-        // A clean white cloud with a faint blueberry tint at the bottom and a berry outline. No glow.
+        // A clean white cloud with a faint violet tint at the bottom and a violet outline. No glow.
         speech.fillColor = NSColor.white.cgColor
         speech.opacity = 0
         speechFill.colors = [NSColor.white.cgColor, NSColor(hex: 0xEEF0FF).cgColor]
@@ -528,7 +528,7 @@ final class CursorView: NSView {
         speechFill.endPoint = CGPoint(x: 0.5, y: 0)
         speechFill.mask = speechFillMask
         speechBorder.fillColor = nil
-        speechBorder.strokeColor = NSColor(hex: Palette.berry2, alpha: 1).cgColor
+        speechBorder.strokeColor = NSColor(hex: Palette.violet2, alpha: 1).cgColor
         speechBorder.lineWidth = 2.5
         speechBorder.lineJoin = .round
         speechText.isWrapped = true
@@ -758,35 +758,35 @@ final class CursorView: NSView {
 
     private func twinkle(at point: CGPoint) {
         star(at: point, radius: .random(in: 3...5.5), travel: CGVector(dx: .random(in: -8...8), dy: .random(in: 6...18)),
-             color: [Palette.berry1, Palette.berry2].randomElement()!, duration: 0.5)
+             color: [Palette.violet1, Palette.violet2].randomElement()!, duration: 0.5)
     }
 
     /// Landing on something it's pointing at: a soft ring and a tiny nod.
     private func softLand(at point: CGPoint) {
         engine.press(depth: 0.05)
-        ring(at: point, radius: 30, color: Palette.berry2, alpha: 0.55, duration: 0.7)
+        ring(at: point, radius: 30, color: Palette.violet2, alpha: 0.55, duration: 0.7)
     }
 
     /// Popping out of (or diving back into) the phone at the bottom edge.
     private func puff(at point: CGPoint) {
         guard Settings.shared.showCursor else { return }
-        ring(at: point, radius: 26, color: Palette.berry1, alpha: 0.6, duration: 0.55)
+        ring(at: point, radius: 26, color: Palette.violet1, alpha: 0.6, duration: 0.55)
         for i in 0..<3 {
             let dx = CGFloat(i - 1) * 14
             star(at: CGPoint(x: point.x + dx, y: point.y - 4), radius: 4, travel: CGVector(dx: dx * 0.6, dy: -28),
-                 color: Palette.berry1, duration: 0.6)
+                 color: Palette.violet1, duration: 0.6)
         }
     }
 
     /// A real click: a firm squish, a ring and a little burst of stars.
     func clickEffect(at point: CGPoint, right: Bool = false) {
         engine.press(depth: 0.14)
-        ring(at: point, radius: 38, color: right ? Palette.berry3 : Palette.berry2, alpha: 0.85, duration: 0.65)
+        ring(at: point, radius: 38, color: right ? Palette.violet3 : Palette.violet2, alpha: 0.85, duration: 0.65)
         for i in 0..<6 {
             let a = CGFloat(i) / 6 * 2 * .pi + .random(in: -0.25...0.25)
             let distance = CGFloat.random(in: 34...58)
             star(at: point, radius: .random(in: 4...7), travel: CGVector(dx: cos(a) * distance, dy: sin(a) * distance),
-                 color: [Palette.berry1, Palette.berry2, Palette.berry3].randomElement()!, duration: 0.55)
+                 color: [Palette.violet1, Palette.violet2, Palette.violet3].randomElement()!, duration: 0.55)
         }
     }
 
@@ -798,7 +798,7 @@ final class CursorView: NSView {
             let glyph = CATextLayer()
             glyph.string = NSAttributedString(string: String(ch), attributes: [
                 .font: Fonts.display(22),
-                .foregroundColor: NSColor(hex: Palette.berry3),
+                .foregroundColor: NSColor(hex: Palette.violet3),
                 .strokeColor: NSColor.white,
                 .strokeWidth: -3.5,
             ])
@@ -839,7 +839,7 @@ final class CursorView: NSView {
         let size = attributed.size()
         let box = CALayer()
         box.backgroundColor = NSColor(hex: Palette.ink, alpha: 0.92).cgColor
-        box.borderColor = NSColor(hex: Palette.berry2, alpha: 0.9).cgColor
+        box.borderColor = NSColor(hex: Palette.violet2, alpha: 0.9).cgColor
         box.borderWidth = 2
         box.cornerRadius = 14
         box.bounds = CGRect(x: 0, y: 0, width: ceil(size.width) + 28, height: ceil(size.height) + 14)

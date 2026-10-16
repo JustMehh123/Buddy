@@ -1,7 +1,7 @@
 /**
  * Buddy's face, drawn on a canvas.
  *
- * This is the browser version of what the SwiftUI app drew: the same blueberry
+ * This is the browser version of what the SwiftUI app drew: the same violet
  * blob, the same googly eyes, the same damped springs so nothing ever snaps.
  * Everything is expressed in a 0..1 design space and scaled to the canvas, so
  * he looks identical on a phone, a tablet or a laptop browser.
@@ -12,14 +12,14 @@
  */
 
 const PALETTE = {
-  berry1: '#A9BCFF',
-  berry2: '#6C86F5',
-  berry3: '#4254D6',
-  berry4: '#2B2F8F',
-  nose: '#1C1F66',
+  violet1: '#C9B2FF',
+  violet2: '#9A6BFF',
+  violet3: '#6C3FE0',
+  violet4: '#3A1E78',
+  nose: '#241042',
   ink: '#17151F',
   inkSoft: '#B9B2CC',
-  panel: '#1E1B29',
+  panel: '#1A1330',
   white: '#FFFFFF'
 };
 
@@ -235,7 +235,7 @@ export class BuddyFace {
     ctx.restore();
   }
 
-  /** The blueberry: four different corner radii, exactly like the design. */
+  /** The violet blob: four different corner radii, exactly like the design. */
   drawBlob(ctx) {
     const r = { x: -0.5, y: -0.5, w: 1, h: 1 };
     const tl = { w: 0.52, h: 0.58 };
@@ -245,10 +245,10 @@ export class BuddyFace {
     const k = 0.5523;
 
     const gradient = ctx.createLinearGradient(-0.42, -0.5, 0.42, 0.5);
-    gradient.addColorStop(0, PALETTE.berry1);
-    gradient.addColorStop(0.34, PALETTE.berry2);
-    gradient.addColorStop(0.68, PALETTE.berry3);
-    gradient.addColorStop(1, PALETTE.berry4);
+    gradient.addColorStop(0, PALETTE.violet1);
+    gradient.addColorStop(0.34, PALETTE.violet2);
+    gradient.addColorStop(0.68, PALETTE.violet3);
+    gradient.addColorStop(1, PALETTE.violet4);
 
     ctx.beginPath();
     ctx.moveTo(r.x + tl.w, r.y);
@@ -275,7 +275,7 @@ export class BuddyFace {
     ctx.closePath();
 
     ctx.save();
-    ctx.shadowColor = 'rgba(66, 84, 214, 0.45)';
+    ctx.shadowColor = 'rgba(108, 63, 224, 0.45)';
     ctx.shadowBlur = 0.09;
     ctx.shadowOffsetY = 0.035;
     ctx.fillStyle = gradient;
@@ -292,7 +292,7 @@ export class BuddyFace {
     // The little stalk dimple at the top, so he reads as a berry.
     ctx.beginPath();
     ctx.ellipse(0.02, -0.44, 0.055, 0.028, -0.15, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(28,31,102,0.55)';
+    ctx.fillStyle = 'rgba(36,16,66,0.6)';
     ctx.fill();
   }
 
@@ -315,7 +315,7 @@ export class BuddyFace {
       ctx.fillStyle = PALETTE.white;
       ctx.fill();
       ctx.lineWidth = 0.008;
-      ctx.strokeStyle = 'rgba(28,31,102,0.18)';
+      ctx.strokeStyle = 'rgba(58,30,120,0.22)';
       ctx.stroke();
 
       // Pupil, clamped inside the sclera so he never looks broken.
@@ -346,12 +346,12 @@ export class BuddyFace {
         const lidHeight = radius.y * 2 * Math.min(1, lidAmount);
         ctx.beginPath();
         ctx.rect(ex - radius.x - 0.01, ey - radius.y - 0.01, radius.x * 2 + 0.02, lidHeight);
-        ctx.fillStyle = PALETTE.berry2;
+        ctx.fillStyle = PALETTE.violet2;
         ctx.fill();
         // A soft edge instead of a hard line.
         ctx.beginPath();
         ctx.rect(ex - radius.x - 0.01, ey - radius.y + lidHeight - 0.012, radius.x * 2 + 0.02, 0.014);
-        ctx.fillStyle = 'rgba(169,188,255,0.75)';
+        ctx.fillStyle = 'rgba(201,178,255,0.75)';
         ctx.fill();
       }
       ctx.restore();
@@ -401,7 +401,7 @@ export class BuddyFace {
       const width = 0.062 + smile * 0.03;
       ctx.beginPath();
       ctx.ellipse(0, 0.235 + height * 0.25, width, height, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(28,31,102,0.92)';
+      ctx.fillStyle = 'rgba(36,16,66,0.92)';
       ctx.fill();
       // Tongue-ish highlight
       ctx.beginPath();
@@ -417,7 +417,7 @@ export class BuddyFace {
       ctx.moveTo(-0.075, 0.215);
       ctx.quadraticCurveTo(0, 0.335, 0.075, 0.215);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(28,31,102,0.9)';
+      ctx.fillStyle = 'rgba(36,16,66,0.9)';
       ctx.fill();
       return;
     }

@@ -13,9 +13,9 @@
  *   raw TCP connection — exactly what the original iPhone app did. Browsers
  *   can't open raw sockets or browse Bonjour, so this process sits in the
  *   middle: it finds the Mac on the Wi-Fi, holds one TCP link to it, and serves
- *   the phone page over HTTP with a matching event stream. The phone never sees
- *   your API key; this server only holds one if you deliberately give it
- *   GEMINI_API_KEY (the Mac's own key is preferred when there is one).
+ *   the phone page over HTTP with a matching event stream. The thinking happens
+ *   on the computer, with a free open-source model (Ollama); there is no key, no
+ *   account and no quota anywhere in the loop.
  *
  *   iPhone Safari refuses to open the microphone on a plain http:// page, so
  *   this generates a small local certificate (via openssl, once) and serves
@@ -30,7 +30,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { createServer } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
 import { connect } from 'node:net';
-import { homedir, hostname, networkInterfaces } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -38,39 +38,41 @@ const HERE = fileURLToPath(new URL('.', import.meta.url));
 const WEB_DIR = resolve(HERE, '..', 'Web');
 const PORT = Number(process.env.BUDDY_PHONE_PORT ?? 8443);
 const DEMO = process.env.BUDDY_DEMO === '1';
-const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const SERVICE_TYPE = 'buddy';
 const FORCED_HOST = process.env.BUDDY_HOST || '';
 const FORCED_PORT = process.env.BUDDY_PORT ? Number(process.env.BUDDY_PORT) : 0;
 const CERT_DIR = process.env.BUDDY_CERT_DIR || join(HERE, '.certs');
 
-// Gemini's free tier is what makes Buddy free to run; these are its realtime models.
-const GEMINI_LIVE_WS =
-  'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_LIVE_MODEL = process.env.BUDDY_LIVE_MODEL || 'gemini-3.8-live';
-const DEFAULT_CHAT_MODEL = process.env.BUDDY_CHAT_MODEL || 'gemini-3.8-flash';
+// Buddy thinks with Ollama — an open-source model server on your own machine.
+// No key, no account, no quota: free, open source and effectively unlimited.
+const BRAIN_HOST = (process.env.BUDDY_OLLAMA_HOST || process.env.OLLAMA_HOST || 'http://127.0.0.1:11434')
+  .replace(/\/+$/, '');
+const BRAIN_MODEL = process.env.BUDDY_MODEL || 'llama3.2';
+const BRAIN_URL = BRAIN_HOST.endsWith('/v1') ? BRAIN_HOST : `${BRAIN_HOST}/v1`;
 
 const log = (...args) => console.log(`\u001b[35mbuddy\u001b[0m`, ...args);
 const warn = (...args) => console.warn(`\u001b[33mbuddy\u001b[0m`, ...args);
 
 /**
- * The key the Mac app saved, if it has one. It writes a small private file in
- * Application Support — the same one the menu bar uses — so pasting the free
- * key into Buddy once is enough for the phone app too.
+ * Is his local model reachable? The bridge asks the server directly, so the
+ * phone can tell "he's thinking" from "Ollama isn't running" in a heartbeat.
  */
-function macStoredKey(name) {
+async function brainStatus() {
+  const base = { host: BRAIN_HOST, model: BRAIN_MODEL };
   try {
-    const path = join(homedir(), 'Library', 'Application Support', 'Buddy', 'keys.json');
-    const saved = JSON.parse(readFileSync(path, 'utf8'));
-    return typeof saved?.[name] === 'string' ? saved[name] : '';
-  } catch {
-    return '';
+    const response = await fetch(`${BRAIN_URL}/models`, { signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return { ...base, ready: false, detail: `HTTP ${response.status}` };
+    const json = await response.json();
+    const models = (json.data || []).map((entry) => entry.id);
+    const wanted = BRAIN_MODEL.split(':')[0];
+    if (models.length && !models.some((id) => id === BRAIN_MODEL || id.startsWith(wanted))) {
+      return { ...base, ready: false, models, detail: 'that model has not been pulled yet' };
+    }
+    return { ...base, ready: models.length > 0, models };
+  } catch (error) {
+    return { ...base, ready: false, detail: error.message };
   }
 }
-
-/** One key is enough — the free Gemini one. Environment first, then the Mac's store. */
-const geminiKey = () => GEMINI_KEY || macStoredKey('gemini');
 
 // ────────────────────────────────────────────────────────────────────────────
 // The link to the Mac
@@ -372,54 +374,30 @@ function makeProfile(openssl, caPath) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Voice credentials: minted on the Mac when it can, here when it can't
+// Who Buddy is: his instructions, his voice and his model (all from the Mac)
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Ask the Mac for a session (his instructions, his tool list, his voice) and a
- * one-shot realtime token. A freshly renamed Mac build answers `liveToken`; if
- * it doesn't, we fall back to our own Gemini key so the phone still works.
+ * Ask the Mac who Buddy is: his instructions, his voice and which model he
+ * thinks with. Nothing secret crosses the wire — his brain runs on the
+ * computer, and the phone just shows what it is told.
  */
 async function getSession() {
-  const fromMac = await askMac({ command: 'liveToken' }, 3000);
+  const fromMac = await askMac({ command: 'webSession' }, 2500);
+  const extra = fromMac?.text ? safeJson(fromMac.text) : null;
+  const status = await brainStatus();
 
-  if (fromMac?.text) {
-    try {
-      const live = normalizeLive(JSON.parse(fromMac.text));
-      if (live) {
-        const session = await askMac({ command: 'webSession' }, 2500);
-        if (session?.text) {
-          try {
-            Object.assign(live.session, JSON.parse(session.text));
-          } catch {
-            /* the Mac's session config is optional */
-          }
-        }
-        return { live, host: { name: mac.name } };
-      }
-    } catch {
-      /* fall through to our own key */
-    }
-  }
-
-  const key = geminiKey();
-  if (key) {
-    const live = await mintGeminiFromEnv(key);
-    const session = await askMac({ command: 'webSession' }, 2500);
-    const extra = session?.text ? safeJson(session.text) : null;
-    if (extra?.instructions) live.session.instructions = extra.instructions;
-    if (Array.isArray(extra?.tools) && extra.tools.length) live.session.tools = extra.tools.map(stripMeta);
-    return { live, host: { name: mac.name }, demo: DEMO || undefined };
-  }
-
-  if (DEMO) return demoSession();
-
-  throw new Error(
-    "No voice provider is available. Add a free Gemini key on the computer (or set GEMINI_API_KEY here) and he'll start talking — no card, no billing."
-  );
+  return {
+    host: { name: mac.name },
+    brain: { host: status.host, model: status.model, ready: status.ready, detail: status.detail },
+    instructions: extra?.instructions || DEFAULT_INSTRUCTIONS,
+    voice: extra?.voice || 'System',
+    model: extra?.model || status.model,
+    temperature: 0.9,
+    demo: DEMO || undefined
+  };
 }
 
-const stripMeta = ({ meta, ...rest }) => rest;
 const safeJson = (text) => {
   try {
     return JSON.parse(text);
@@ -428,61 +406,11 @@ const safeJson = (text) => {
   }
 };
 
-/** Accept the token the Mac minted. */
-function normalizeLive(parsed) {
-  if (!parsed.token) return null;
-  return {
-    provider: 'gemini',
-    token: parsed.token,
-    wsUrl: parsed.wsUrl || GEMINI_LIVE_WS,
-    model: parsed.model || DEFAULT_LIVE_MODEL,
-    fallbacks: Array.isArray(parsed.fallbacks) ? parsed.fallbacks : undefined,
-    expiresAt: parsed.expiresAt || Date.now() + 30 * 60 * 1000,
-    session: parsed.session || defaultSession(parsed.model || DEFAULT_LIVE_MODEL)
-  };
-}
-
-async function mintGeminiFromEnv(key) {
-  const expireTime = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-  const response = await fetch('https://generativelanguage.googleapis.com/v1alpha/auth_tokens', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({ uses: 1, expireTime })
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Gemini rejected the key (${response.status}). ${detail.slice(0, 160)}`);
-  }
-  const json = await response.json();
-  log('minted a one-shot Gemini voice token for the phone');
-  return {
-    provider: 'gemini',
-    token: json.name,
-    wsUrl: GEMINI_LIVE_WS,
-    model: DEFAULT_LIVE_MODEL,
-    expiresAt: Date.parse(expireTime),
-    session: defaultSession(DEFAULT_LIVE_MODEL)
-  };
-}
-
-const defaultSession = (model) => ({
-  model,
-  voice: 'Puck',
-  temperature: 0.85,
-  outputModalities: ['audio'],
-  instructions:
-    "You are Buddy: a small, warm, slightly cheeky companion who lives on the user's phone and in their computer. You can hear them whenever they hold the screen and talk. Keep replies to one or two short spoken sentences, never lists or markdown. Use your eye and cursor tools to look at their screen and point at things — point rather than click, and only touch the computer when asked.",
-  tools: []
-});
-
-/**
- * Demo mode has no real voice provider, so we deliberately send no `live`
- * block: the page then falls back to the phone's own voice and to `/api/chat`,
- * which answers from the script below. Talking to him in demo mode works.
- */
-function demoSession() {
-  return { host: { name: 'the demo computer' }, demo: true };
-}
+/** His fallback personality, used only when the Mac isn't there to give the real one. */
+const DEFAULT_INSTRUCTIONS =
+  "You are Buddy: a small, warm, slightly cheeky violet companion who lives on the user's phone and in their computer. " +
+  'Keep replies to one or two short spoken sentences, never lists or markdown. Use your tools for anything on screen, ' +
+  'then reply in a few words.';
 
 const DEMO_REPLIES = [
   'I can hear you. In demo mode I answer from a script, but the face is real.',
@@ -496,44 +424,55 @@ let demoReplyIndex = 0;
 const nextDemoReply = () => DEMO_REPLIES[demoReplyIndex++ % DEMO_REPLIES.length];
 
 // ────────────────────────────────────────────────────────────────────────────
-// The chat fallback: text in, text out, using the free tier
+// The chat path: text in, text out, from the open-source model on the computer
 // ────────────────────────────────────────────────────────────────────────────
 
 async function chat(body) {
   const text = String(body.text || '').slice(0, 4000);
   if (!text) throw new Error('nothing to say');
 
-  // Preferred: let the Mac answer, so it uses his real instructions, his real
-  // tools and his own copy of the key. The Mac answers `chat`.
-  const fromMac = await askMac({ command: 'chat', text }, 6000);
+  // Preferred: let the Mac answer, so it uses his real instructions and runs
+  // his real tools (looking, pointing, using the computer). He may take a few
+  // steps, so allow a generous wait.
+  const fromMac = await askMac({ command: 'chat', text }, 90000);
   if (fromMac?.text) return { text: fromMac.text, via: 'mac' };
 
   if (DEMO) return { text: nextDemoReply(), via: 'demo' };
 
-  const key = geminiKey();
-  if (!key) {
-    throw new Error('No free Gemini key yet. Open Buddy in the menu bar, choose "Voice Key (free Gemini)…" and paste one.');
+  // No Mac listening: answer from the local model directly. Still free, still
+  // on the computer — just without his eyes and hands.
+  const session = await askMac({ command: 'webSession' }, 2000);
+  const instructions = safeJson(session?.text || '')?.instructions || DEFAULT_INSTRUCTIONS;
+  return { text: await askBrain(text, instructions), via: 'bridge' };
+}
+
+/** One call to the local model, no tools — the bridge's own small fallback. */
+async function askBrain(text, instructions) {
+  let response;
+  try {
+    response = await fetch(`${BRAIN_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: BRAIN_MODEL,
+        messages: [
+          { role: 'system', content: `${instructions}\n\nAnswer in one or two short spoken sentences.` },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.9,
+        stream: false
+      }),
+      signal: AbortSignal.timeout(120000)
+    });
+  } catch (error) {
+    throw new Error(
+      `I can't reach the model on your computer (${error.message}). Start it with "ollama serve", then try again.`
+    );
   }
-
-  const session = await askMac({ command: 'webSession' }, 2500);
-  const instructions = safeJson(session?.text || '')?.instructions || defaultSession(DEFAULT_CHAT_MODEL).instructions;
-
-  const response = await fetch(`${GEMINI_API}/${encodeURIComponent(DEFAULT_CHAT_MODEL)}:generateContent`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text }] }],
-      systemInstruction: { parts: [{ text: `${instructions}\n\nAnswer in one or two short spoken sentences.` }] },
-      generationConfig: { temperature: 0.9, maxOutputTokens: 400 }
-    })
-  });
-  if (!response.ok) throw new Error(`Gemini could not answer (${response.status})`);
+  if (!response.ok) throw new Error(`The model could not answer (${response.status}). Is Ollama running?`);
   const json = await response.json();
-  const reply = (json.candidates?.[0]?.content?.parts || [])
-    .map((part) => part.text || '')
-    .join('')
-    .trim();
-  return { text: reply || "I'm not sure what to say to that.", via: 'bridge' };
+  const reply = (json.choices?.[0]?.message?.content || '').trim();
+  return reply || "I'm not sure what to say to that.";
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -658,9 +597,10 @@ const handler = async (request, response) => {
         ...session,
         settings: {
           name: 'Buddy',
-          voice: session.live?.session?.voice || 'Puck',
+          voice: session.voice || 'System',
           computerUse: true,
-          chime: true
+          chime: true,
+          brain: session.brain
         }
       });
     } catch (error) {
@@ -699,7 +639,7 @@ const handler = async (request, response) => {
       mac: { connected: mac.connected, host: mac.host, port: mac.port, name: mac.name },
       demo: DEMO,
       secure: Boolean(certificates),
-      geminiKeyOnBridge: Boolean(geminiKey()),
+      brain: await brainStatus(),
       phones: streams.size
     });
   }
@@ -734,7 +674,7 @@ const server = certificates
   : createServer(handler);
 
 /** The phone keeps one of these open for as long as the page is alive. */
-function openStream(request, response) {
+async function openStream(request, response) {
   response.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
@@ -745,6 +685,7 @@ function openStream(request, response) {
   streams.add(response);
   log(`a phone opened the page (${streams.size} now)`);
 
+  const status = await brainStatus();
   if (mac.lastFace) sse(response, { face: mac.lastFace });
   sse(response, { hello: mac.name });
   sse(response, { command: mac.connected ? 'webConnected' : 'webDisconnected' });
@@ -754,7 +695,7 @@ function openStream(request, response) {
       secure: Boolean(certificates),
       host: mac.name,
       demo: DEMO,
-      hasKey: Boolean(geminiKey())
+      brain: { ready: status.ready, model: status.model, host: status.host, detail: status.detail }
     })
   });
 
@@ -783,16 +724,16 @@ function installPage(response, over = 'https', appUrl = '/') {
 <title>Trust Buddy on this phone</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; padding: 1.5rem 1.25rem 3rem; background: #0b0d17; color: #eef1ff;
+  body { margin: 0; padding: 1.5rem 1.25rem 3rem; background: #0c0918; color: #eef1ff;
          font: 16px/1.55 -apple-system, system-ui, sans-serif; }
   h1 { font-size: 1.4rem; margin: 0 0 .75rem; }
-  h2 { font-size: 1.05rem; margin: 1.5rem 0 .35rem; color: #a9bcff; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .35rem; color: #c9b2ff; }
   p, li { color: #cfd3ea; }
   a.install { display: block; margin: 1.25rem 0; padding: .95rem 1rem; border-radius: 1rem; text-align: center;
-              background: linear-gradient(135deg, #6c86f5, #4254d6); color: white; font-weight: 600;
+              background: linear-gradient(135deg, #9a6bff, #6c3fe0); color: white; font-weight: 600;
               text-decoration: none; }
   ol { padding-left: 1.2rem; }
-  code { background: #1e2338; padding: .1rem .35rem; border-radius: .35rem; font-size: .9em; }
+  code { background: #221a3a; padding: .1rem .35rem; border-radius: .35rem; font-size: .9em; }
 </style></head>
 <body>
   <h1>One-time step: trust this computer</h1>
@@ -952,6 +893,18 @@ if (companionPort) {
 if (DEMO) lines.push('', 'Demo mode is ON: no Mac needed, he does faces and answers from a script.');
 else lines.push('', 'He finds your Mac on his own when the Buddy app is running.');
 if (!certificates) lines.push('', 'Plain HTTP: the face and buttons work; iPhone will not give a web page the microphone.');
+
+// Say plainly whether his brain is up, since that is the one moving part now.
+const brainNow = await brainStatus();
+if (brainNow.ready) {
+  lines.push('', `Brain: ${brainNow.model} on ${brainNow.host} — free, open source and unlimited.`);
+} else {
+  lines.push(
+    '',
+    `Brain: nothing is answering at ${brainNow.host} yet.`,
+    `   Install Ollama (ollama.com), run "ollama serve", then "ollama pull ${BRAIN_MODEL}".`
+  );
+}
 
 console.log(`\n\u001b[35m${lines.join('\n')}\u001b[0m\n`);
 

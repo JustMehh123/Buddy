@@ -4,21 +4,18 @@
  * Buddy is useless without the computer he lives with, so there is no offline
  * mode to speak of. What this buys us is an instant home-screen launch: the
  * shell (HTML, CSS, the face) is cached, so tapping his icon shows his face
- * immediately while the socket to the Mac reconnects behind it.
+ * immediately while the phone reconnects to the computer behind it.
  *
  * Network-first, always: the page itself must never go stale.
  */
 
-const CACHE = 'buddy-shell-v1';
+const CACHE = 'buddy-shell-v2';
 const SHELL = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './face.js',
-  './live.js',
-  './mic-worklet.js',
-  './out-worklet.js',
   './icons/apple-touch-icon.png',
   './icons/icon-192.png',
   './fonts/Fredoka.ttf'

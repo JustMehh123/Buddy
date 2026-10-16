@@ -25,15 +25,15 @@
 }
 
 :root {
-  --berry1: #a9bcff;
-  --berry2: #6c86f5;
-  --berry3: #4254d6;
-  --berry4: #2b2f8f;
-  --ink: #0b0d17;
+  --violet1: #c9b2ff;
+  --violet2: #9a6bff;
+  --violet3: #6c3fe0;
+  --violet4: #3a1e78;
+  --ink: #0c0918;
   --ink-soft: #b9b2cc;
-  --panel: #161a2c;
-  --panel-soft: #1e2338;
-  --line: rgba(169, 188, 255, 0.14);
+  --panel: #1a1330;
+  --panel-soft: #221a3a;
+  --line: rgba(201, 178, 255, 0.14);
   --good: #7ce3a8;
   --warn: #ffd479;
   --bad: #ff8a8a;
@@ -71,9 +71,9 @@ body {
   position: absolute;
   inset: -20%;
   background:
-    radial-gradient(38% 30% at 22% 18%, rgba(108, 134, 245, 0.35), transparent 70%),
-    radial-gradient(42% 34% at 80% 26%, rgba(66, 84, 214, 0.32), transparent 72%),
-    radial-gradient(50% 40% at 50% 88%, rgba(43, 47, 143, 0.45), transparent 70%);
+    radial-gradient(38% 30% at 22% 18%, rgba(154, 107, 255, 0.35), transparent 70%),
+    radial-gradient(42% 34% at 80% 26%, rgba(108, 63, 224, 0.32), transparent 72%),
+    radial-gradient(50% 40% at 50% 88%, rgba(58, 30, 120, 0.45), transparent 70%);
   filter: blur(10px);
   animation: drift 26s ease-in-out infinite alternate;
   pointer-events: none;
@@ -168,8 +168,8 @@ body {
   height: 2.5rem;
   border-radius: 0.9rem;
   border: 1px solid var(--line);
-  background: rgba(22, 26, 44, 0.6);
-  color: var(--berry1);
+  background: rgba(26, 19, 48, 0.6);
+  color: var(--violet1);
   backdrop-filter: blur(14px);
   cursor: pointer;
   transition: transform 0.12s ease, background 0.2s ease;
@@ -195,7 +195,7 @@ body {
 #face {
   width: min(84vw, 62vh);
   height: min(84vw, 62vh);
-  filter: drop-shadow(0 30px 60px rgba(43, 47, 143, 0.55));
+  filter: drop-shadow(0 30px 60px rgba(58, 30, 120, 0.55));
 }
 
 #bubble {
@@ -207,7 +207,7 @@ body {
   padding: 0.85rem 1.1rem;
   border-radius: 1.25rem;
   border: 1px solid var(--line);
-  background: rgba(22, 26, 44, 0.92);
+  background: rgba(26, 19, 48, 0.92);
   backdrop-filter: blur(18px);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
   opacity: 0;
@@ -286,7 +286,7 @@ body {
   border-radius: 1.6rem 1.6rem 0 0;
   border: 1px solid var(--line);
   border-bottom: none;
-  background: linear-gradient(180deg, var(--panel) 0%, #12162a 100%);
+  background: linear-gradient(180deg, var(--panel) 0%, #120c24 100%);
   transform: translateY(18px);
   transition: transform 0.24s ease;
 }
@@ -314,7 +314,7 @@ body {
   padding: 0.9rem 1rem;
   border: none;
   border-radius: 1rem;
-  background: linear-gradient(135deg, var(--berry2), var(--berry3));
+  background: linear-gradient(135deg, var(--violet2), var(--violet3));
   color: white;
   font-family: 'Fredoka', system-ui, sans-serif;
   font-size: 1.02rem;
@@ -374,7 +374,7 @@ body {
   width: 2.8rem;
   height: 1.65rem;
   border-radius: 999px;
-  background: #2c3350;
+  background: #33265a;
   position: relative;
   transition: background 0.18s ease;
   cursor: pointer;
@@ -392,7 +392,7 @@ body {
   transition: transform 0.18s ease;
 }
 .switch input:checked {
-  background: var(--berry2);
+  background: var(--violet2);
 }
 .switch input:checked::after {
   transform: translateX(1.15rem);

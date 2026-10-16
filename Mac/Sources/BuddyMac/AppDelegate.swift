@@ -57,9 +57,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ⌃⌥S stops him using the computer right away.
         HotKeys.shared.register(keyCode: kVK_ANSI_S) { [weak self] in self?.stopActions() }
 
-        // First run: ask for the free key, which is the only one he needs.
-        if Keychain.get(.gemini) == nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.editGeminiKey() }
+        // First run: make sure his local model is reachable, and offer to set it
+        // up if not. Nothing to paste — just an open-source model on this Mac.
+        Task { @MainActor in
+            let health = await Brain.health()
+            if !health.ok, UserDefaults.standard.bool(forKey: "brainPrompted") == false {
+                UserDefaults.standard.set(true, forKey: "brainPrompted")
+                self.editBrain()
+            }
         }
     }
 
@@ -201,35 +206,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         restartIfAwake()
     }
 
-    /// The free path: a Google AI Studio key. No card, no billing, and it is
-    /// all his voice needs — on the phone and for research.
-    @objc private func editGeminiKey() {
+    /// Where he thinks: a free, open-source model running on this Mac (Ollama).
+    /// There is no key to paste — just a server and a model name.
+    @objc private func editBrain() {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Buddy's Key (free)"
+        alert.messageText = "Buddy's Brain"
         alert.informativeText = """
-        Everything Buddy does — talking with you, looking at your screen, researching, taking meeting notes — \
-        runs on Google's Gemini, which has a free tier: no card, no billing, no other account.
+        Buddy thinks with an open-source model running on this Mac. No key, no account, no quota — it is \
+        free and unlimited because it is your own machine doing the work.
 
-        1. Open aistudio.google.com/apikey and sign in with a Google account.
-        2. Create an API key and copy it.
-        3. Paste it here. It stays on this Mac — your phone only ever receives short-lived, one-session tokens.
+        Set him up once:
+        1. Install Ollama from ollama.com (or run: brew install ollama).
+        2. Start it: ollama serve
+        3. Pull a model: ollama pull llama3.2
+
+        Leave a field empty to use the default.
         """
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = Keychain.get(.gemini) == nil ? "AIza…" : "Key saved. Paste a new one to replace it."
-        alert.accessoryView = field
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 56))
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 30, width: 380, height: 22))
+        hostField.placeholderString = "Model server (default http://127.0.0.1:11434)"
+        hostField.stringValue = Settings.shared.brainHost
+        let modelField = NSTextField(frame: NSRect(x: 0, y: 2, width: 380, height: 22))
+        modelField.placeholderString = "Model (default llama3.2)"
+        modelField.stringValue = Settings.shared.brainModel
+        container.addSubview(hostField)
+        container.addSubview(modelField)
+        alert.accessoryView = container
         alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Open AI Studio")
+        alert.addButton(withTitle: "Get Ollama")
         alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
+        alert.window.initialFirstResponder = hostField
         let response = alert.runModal()
         if response == .alertSecondButtonReturn {
-            if let url = URL(string: "https://aistudio.google.com/apikey") { NSWorkspace.shared.open(url) }
+            if let url = URL(string: "https://ollama.com/download") { NSWorkspace.shared.open(url) }
             return
         }
         guard response == .alertFirstButtonReturn else { return }
-        let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty { Keychain.set(.gemini, key) }
+        Settings.shared.brainHost = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        Settings.shared.brainModel = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        restartIfAwake()
     }
 
     @objc private func setMood(_ item: NSMenuItem) {
@@ -246,6 +262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                 action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+        let brain = NSMenuItem(title: "Brain: \(Brain.chatModel) — \(Brain.host)", action: nil, keyEquivalent: "")
+        brain.isEnabled = false
+        menu.addItem(brain)
         let wake = NSMenuItem(title: host.awake ? "Go to Sleep (Follow Mode)" : "Wake Up and Talk",
                               action: #selector(toggleAwake), keyEquivalent: " ")
         wake.keyEquivalentModifierMask = [.option]
@@ -301,7 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(item("Open Meeting Notes", #selector(openNotes)))
         menu.addItem(item("Personality…", #selector(editPersonality)))
-        menu.addItem(item("Voice Key (free Gemini)…", #selector(editGeminiKey)))
+        menu.addItem(item("Brain (local model)…", #selector(editBrain)))
         menu.addItem(.separator())
 
         let trailMenu = NSMenu()
@@ -339,7 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-/// The little blueberry blob with eyes for the menu bar.
+/// The little violet blob with eyes for the menu bar.
 enum MenuIcon {
     static func make() -> NSImage {
         let image = NSImage(size: NSSize(width: 22, height: 18), flipped: true) { rect in

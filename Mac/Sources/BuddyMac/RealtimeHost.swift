@@ -1,10 +1,11 @@
 import AppKit
 import BuddyShared
 
-/// The Mac's half of live voice. The phone runs the speech-to-speech session (its mic, its speaker);
-/// the Mac hands it a short-lived Gemini token plus who he is and what he can do, runs his tools
-/// (look, point, and use the computer) and shows captions. Everything here runs on the main thread,
-/// alongside the cursor it drives.
+/// The Mac's half of a conversation. The phone listens and speaks with the
+/// speech it already has, and sends the words here; the Mac runs them through
+/// his local open-source model — deciding which tools to use (look, point, use
+/// the computer) and showing captions — then sends the answer back. Everything
+/// here runs on the main thread, alongside the cursor it drives.
 @MainActor
 final class RealtimeHost {
     private let overlay: CursorOverlay
@@ -29,46 +30,24 @@ final class RealtimeHost {
     /// Handles a request from the phone. `reply` sends a packet back to that phone.
     func handle(_ packet: Packet, reply: @escaping (Packet) -> Void) {
         switch packet.command {
-        case "liveToken", "realtimeToken":
-            // The phone (or the little web bridge) asks for permission to talk:
-            // a one-shot Gemini token, plus his instructions and tools.
-            Task { @MainActor in
-                do {
-                    let token = try await Gemini.liveToken()
-                    let payload: [String: Any] = [
-                        "provider": "gemini",
-                        "token": token.value,
-                        "wsUrl": Gemini.liveWebSocket,
-                        "model": Gemini.liveModel,
-                        "fallbacks": Gemini.liveFallbacks,
-                        "expiresAt": token.expiresAt.timeIntervalSince1970 * 1000,
-                        "session": Self.session,
-                    ]
-                    let text = (try? JSONSerialization.data(withJSONObject: payload))
-                        .flatMap { String(data: $0, encoding: .utf8) }
-                    reply(Packet(command: "liveToken", callID: packet.callID, text: text))
-                } catch {
-                    NSLog("Buddy: could not mint a voice token: \(error)")
-                    reply(Packet(command: "liveToken", callID: packet.callID))
-                    self.showCaption(error.localizedDescription, for: 6)
-                }
-            }
         case "webSession":
-            // Who he is and what he can do, without any credential: used when
-            // something else (a bridge with its own key) runs the voice.
+            // Who he is and which model he thinks with — no secret in it. The
+            // bridge uses this when it answers on his behalf, and the phone
+            // shows it on its settings screen.
             let sessionPayload: [String: Any] = [
                 "instructions": Self.instructions,
-                "tools": Self.tools,
                 "voice": Settings.shared.voice,
-                "model": Gemini.liveModel,
+                "model": Brain.chatModel,
                 "temperature": 0.9,
+                "brain": ["host": Brain.host, "model": Brain.chatModel],
             ]
             reply(Packet(command: "webSession", callID: packet.callID,
                          text: (try? JSONSerialization.data(withJSONObject: sessionPayload))
                              .flatMap { String(data: $0, encoding: .utf8) }))
         case "chat":
-            // Written to him instead of spoken, or the phone is using its own
-            // voice: either way he answers in text.
+            // Written to him, or the phone using the voice it already has:
+            // either way the words arrive here and he answers in text, using
+            // his tools on the way.
             Task { @MainActor in
                 let question = (packet.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !question.isEmpty else {
@@ -76,11 +55,11 @@ final class RealtimeHost {
                     return
                 }
                 do {
-                    let answer = try await Gemini.answer(question, instructions: Self.instructions)
+                    let answer = try await self.answer(question)
                     reply(Packet(command: "chat", callID: packet.callID, text: answer))
                 } catch {
                     NSLog("Buddy: chat failed: \(error)")
-                    reply(Packet(command: "chat", callID: packet.callID, text: ""))
+                    reply(Packet(command: "chat", callID: packet.callID, text: error.localizedDescription))
                 }
             }
         case "transcribe":
@@ -151,6 +130,35 @@ final class RealtimeHost {
         }
     }
 
+    /// Runs one question through his local model, letting it call tools until it
+    /// has an answer. The tools run on this Mac, so pointing and screen actions
+    /// happen for real while he thinks.
+    private func answer(_ question: String) async throws -> String {
+        var messages: [[String: Any]] = [
+            ["role": "system", "content": Self.instructions],
+            ["role": "user", "content": question],
+        ]
+        // A handful of steps is plenty; a small model should not loop forever.
+        for _ in 0..<6 {
+            let (text, calls) = try await Brain.chat(messages: messages, tools: Self.functionTools)
+            guard !calls.isEmpty else {
+                let reply = text.isEmpty ? "I'm not sure what to say to that." : text
+                showCaption(reply, for: 0)
+                return reply
+            }
+            messages.append(["role": "assistant", "content": text.isEmpty ? NSNull() : text, "tool_calls": calls])
+            for call in calls {
+                let function = call["function"] as? [String: Any]
+                let name = function?["name"] as? String ?? ""
+                let arguments = function?["arguments"] as? String ?? "{}"
+                let id = call["id"] as? String ?? UUID().uuidString
+                let result = await runTool(name, arguments: arguments)
+                messages.append(["role": "tool", "tool_call_id": id, "name": name, "content": result.text])
+            }
+        }
+        return "That needed a few steps; I'll stop there."
+    }
+
     /// BUDDY_DEMO_RESEARCH="question": runs a real research call and saves pictures of the card.
     func demoResearch(_ question: String, out: String) {
         Task { @MainActor in
@@ -200,7 +208,7 @@ final class RealtimeHost {
 
     // MARK: Tools
 
-    /// One tool, in the shape Gemini's function declarations expect.
+    /// One tool, in the shape a model's function declarations expect.
     private static func tool(_ name: String, _ description: String,
                              _ properties: [String: Any] = [:], required: [String] = []) -> [String: Any] {
         ["name": name, "description": description,
@@ -263,6 +271,12 @@ final class RealtimeHost {
                  ["url": ["type": "string"]], required: ["url"]),
         ]
         return list
+    }
+
+    /// The same tools wrapped in the standard function-calling shape — the one
+    /// Ollama (and every other local model server) accepts.
+    private static var functionTools: [[String: Any]] {
+        tools.map { ["type": "function", "function": $0] }
     }
 
     /// Separates his instructions from the report text, so the phone can save the report in the transcript.
@@ -627,11 +641,11 @@ final class RealtimeHost {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
-    // MARK: Token
+    // MARK: Who he is
 
     /// Who he is. Editable from the menu bar (Personality…).
     static let defaultPersonality = """
-    You are a small blueberry with big buddy eyes who lives on the user's phone and on their Mac, with your own \
+    You are a small violet blob with big buddy eyes who lives on the user's phone and on their Mac, with your own \
     cursor on the computer. You're a young British guy: dry, quick-witted, a bit cheeky, British phrasing. \
     Your replies appear as a tiny speech bubble and are spoken out loud, so keep them to one or two short \
     sentences, under about twenty-five words, and never use lists, headings or markdown. Answer immediately with \
@@ -688,17 +702,5 @@ final class RealtimeHost {
 
     static var instructions: String {
         personality + "\n\n" + toolGuide + (Settings.shared.computerControl ? "\n\n" + computerGuide : "")
-    }
-
-    /// What the phone needs to start a voice session: his identity, his tools,
-    /// and how he should sound. The credential itself is minted separately.
-    static var session: [String: Any] {
-        [
-            "model": Gemini.liveModel,
-            "instructions": instructions,
-            "voice": Settings.shared.voice,
-            "temperature": 0.9,
-            "tools": tools,
-        ]
     }
 }

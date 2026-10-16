@@ -82,8 +82,9 @@ window.EventSource = FakeEventSource;
 
 const requests = [];
 const session = {
-  live: null,
-  settings: { name: 'Buddy', voice: 'Puck', computerUse: true, chime: true },
+  instructions: 'You are Buddy.',
+  brain: { host: 'http://127.0.0.1:11434', model: 'llama3.2', ready: true },
+  settings: { name: 'Buddy', voice: 'System', computerUse: true, chime: true },
   host: { name: 'Test Mac' }
 };
 window.fetch = async (url, options = {}) => {
@@ -165,7 +166,7 @@ await sleep(80);
 const posted = () => requests.filter((request) => request.url.includes('/api/send')).map((request) => request.body);
 note(posted().some((packet) => packet?.hello), 'it introduced itself with a hello packet');
 note(posted().some((packet) => packet?.command === 'webClient'), 'it told the computer it is the web client');
-note(requests.some((request) => request.url.includes('/api/session')), 'it asked for a voice session');
+note(requests.some((request) => request.url.includes('/api/session')), 'it asked for a session (instructions + brain)');
 note($('#status-dot').dataset.kind === 'ready', `the status dot reads "${$('#status-dot').dataset.kind}"`);
 note($('#status').textContent.length > 0, `the status line reads "${$('#status').textContent}"`);
 

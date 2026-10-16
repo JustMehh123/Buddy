@@ -1,16 +1,29 @@
 #!/usr/bin/env node
 /**
- * Tests the voice path without a network: a fake Gemini socket, the real
- * LiveVoice class.
+ * Tests the voice path end to end, with no network and no model installed.
  *
- *   node companion/tools/voice-path.mjs
+ *   node tools/voice-path.mjs
  *
- * The interesting part is the loop between his eyes and his mouth. When a tool
- * comes back with a screenshot, Gemini's function responses cannot carry an
- * image, so the picture has to go out as a still frame of live input just before
- * the answer. That ordering is easy to break and hard to notice by hand, so it
- * is pinned down here: setup → tool call → image frame → tool response.
+ * The phone speaks with its own built-in speech, and all the thinking happens on
+ * a local, open-source model. This stands up a *fake* Ollama server, boots the
+ * real bridge pointed at it, and drives the same HTTP calls the phone makes:
+ *
+ *   GET  /api/status   → is the brain ready?
+ *   POST /api/session  → who is he? (and: no `live` credential any more)
+ *   POST /api/chat     → the answer the phone actually shows and speaks
+ *
+ * If the bridge stopped reaching the model, or started leaking a `live` block
+ * again, this fails.
  */
+
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { createServer as createSocket } from 'node:net';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const COMPANION = join(HERE, '..');
 
 const problems = [];
 const note = (ok, what) => {
@@ -18,272 +31,148 @@ const note = (ok, what) => {
   if (!ok) problems.push(what);
 };
 
-// ── A browser's worth of stubs ──────────────────────────────────────────────
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-class FakeSocket {
-  static last = null;
-  static all = [];
-  // live.js checks these constants exactly as a browser provides them.
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSING = 2;
-  static CLOSED = 3;
-
-  constructor(url) {
-    this.url = url;
-    this.readyState = 0;
-    this.sent = [];
-    FakeSocket.last = this;
-    FakeSocket.all.push(this);
-    setTimeout(() => {
-      this.readyState = 1;
-      this.onopen?.();
-    }, 0);
-  }
-
-  send(payload) {
-    this.sent.push(JSON.parse(payload));
-    // The service acknowledges a session with setupComplete; connect() waits
-    // for exactly that before calling itself connected.
-    if (this.acknowledges !== false && this.sent[this.sent.length - 1].setup) {
-      setTimeout(() => this.deliver({ setupComplete: {} }), 2);
-    }
-  }
-
-  close() {
-    this.readyState = 3;
-    this.onclose?.({ code: 1000, reason: '' });
-  }
-
-  /** A message from the service. */
-  deliver(message) {
-    this.onmessage?.({ data: JSON.stringify(message) });
-  }
-
-  events(...types) {
-    return this.sent.filter((payload) => types.some((type) => payload[type] !== undefined));
-  }
-
-  last(type) {
-    const matches = this.events(type);
-    return matches[matches.length - 1]?.[type];
-  }
-
-  indexOf(type) {
-    return this.sent.findIndex((payload) => payload[type] !== undefined);
-  }
-}
-
-const workletNode = () => ({
-  port: { postMessage() {}, set onmessage(_) {} },
-  connect() {},
-  disconnect() {}
-});
-
-class FakeAudioContext {
-  constructor(options = {}) {
-    this.sampleRate = options.sampleRate || 48000;
-    this.state = 'running';
-    this.destination = { name: 'destination' };
-    this.audioWorklet = { addModule: async () => undefined };
-  }
-  resume() {
-    return Promise.resolve();
-  }
-  createMediaStreamSource() {
-    return { connect() {} };
-  }
-  createGain() {
-    return { gain: { value: 1 }, connect() {} };
-  }
-  close() {
-    return Promise.resolve();
-  }
-}
-
-Object.defineProperties(globalThis, {
-  navigator: {
-    value: {
-      mediaDevices: {
-        getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] })
-      },
-      language: 'en-CA',
-      userAgent: 'node-test'
-    },
-    configurable: true
-  },
-  fetch: { value: async () => ({ ok: true, json: async () => ({}) }), configurable: true },
-  window: { value: globalThis, configurable: true },
-  isSecureContext: { value: true, configurable: true },
-  WebSocket: { value: FakeSocket, configurable: true },
-  AudioContext: { value: FakeAudioContext, configurable: true },
-  AudioWorkletNode: {
-    value: class {
-      constructor() {
-        this.port = { postMessage() {}, set onmessage(_) {} };
-      }
-      connect() {}
-    },
-    configurable: true
-  }
-});
-
-const { LiveVoice } = await import('../../Web/live.js');
-
-// ── The session ─────────────────────────────────────────────────────────────
-
-const SCREENSHOT = '/9j/4AAQSkZJRgABAQAAAQ==' + 'morejpegbytes';
-const frame = { ok: true, text: 'The screen shows Mail open.', image: SCREENSHOT };
-const tools = [
-  {
-    name: 'look_at_screen',
-    description: 'Take a fresh look at the screen.',
-    parameters: { type: 'object', properties: {}, required: [] }
-  },
-  {
-    name: 'point_at',
-    description: 'Point at something.',
-    parameters: { type: 'object', properties: { target_id: { type: 'string' } }, required: ['target_id'] }
-  }
-];
-
-const toolCalls = [];
-const voice = new LiveVoice({
-  onTool: async (call) => {
-    toolCalls.push(call);
-    return frame;
-  },
-  onTranscript: () => undefined,
-  onStatus: () => undefined
-});
-
-console.log('Buddy voice path — fake socket test\n');
-
-await voice.connect({
-  token: 'eph-token',
-  wsUrl: 'wss://generativelanguage.googleapis.com/ws/…BidiGenerateContent',
-  session: { model: 'gemini-3.1-flash-live-preview', instructions: 'You are Buddy.', voice: 'Puck', tools },
-  pushToTalk: true,
-  voiceOut: false
-});
-
-const socket = FakeSocket.last;
-note(socket.url.includes('access_token=eph-token'), 'the token is passed on the socket URL');
-note(socket.indexOf('setup') === 0, 'the first thing sent is a setup message');
-
-const setup = socket.last('setup');
-note(setup?.model === 'models/gemini-3.1-flash-live-preview', `the setup names the model (${setup?.model})`);
-note(setup?.generationConfig?.responseModalities?.[0] === 'AUDIO', 'he answers with audio');
-note(setup?.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName === 'Puck', 'the voice is the one the Mac asked for');
-note(setup?.systemInstruction?.parts?.[0]?.text === 'You are Buddy.', 'his instructions come from the Mac');
-const declarations = setup?.tools?.[0]?.functionDeclarations || [];
-note(declarations.length === 2, `his tools travel with the session (${declarations.length})`);
-note(declarations[0]?.name === 'look_at_screen', 'the first tool is look_at_screen');
-note(!('type' in (declarations[0] || {})) || declarations[0].type === undefined, 'tool declarations are in Gemini style, not OpenAI style');
-note(Boolean(setup?.realtimeInputConfig?.automaticActivityDetection?.disabled), 'push-to-talk disables automatic turns');
-
-// ── A turn: hold, speak, let go ─────────────────────────────────────────────
-
-voice.beginHold();
-note(socket.last('realtimeInput')?.activityStart !== undefined, 'holding the screen opens a turn');
-voice.endHold();
-const endMessages = socket.events('realtimeInput');
-note(JSON.stringify(endMessages[endMessages.length - 1]).includes('activityEnd'), 'letting go closes the turn');
-
-// ── A tool call, with a picture coming back ─────────────────────────────────
-
-socket.deliver({
-  toolCall: {
-    functionCalls: [{ id: 'fc1', name: 'look_at_screen', args: {} }]
-  }
-});
-await new Promise((resolve) => setTimeout(resolve, 30));
-
-note(toolCalls.length === 1 && toolCalls[0].name === 'look_at_screen', 'the tool call reaches the page');
-
-const videoPayload = socket.sent.filter((payload) => payload.realtimeInput?.video).pop();
-note(Boolean(videoPayload), 'the screenshot goes out as a still frame');
-note(videoPayload?.realtimeInput?.video?.mimeType === 'image/jpeg', 'it is sent as a JPEG');
-note(videoPayload?.realtimeInput?.video?.data === SCREENSHOT, 'the frame is the picture the Mac sent');
-
-const responses = socket.events('toolResponse');
-note(responses.length === 1, 'exactly one tool response goes back');
-const response = responses[0]?.toolResponse?.functionResponses?.[0];
-note(response?.id === 'fc1' && response?.name === 'look_at_screen', 'the response is paired with the call by id');
-note(response?.response?.result?.text?.includes('Mail'), 'the words of the tool result are passed on');
-note(response?.response?.result?.image === undefined, 'the picture is not duplicated inside the JSON response');
-
-const frameOrder = socket.sent.findIndex((payload) => payload.realtimeInput?.video);
-const responseOrder = socket.sent.findIndex((payload) => payload.toolResponse);
-note(frameOrder >= 0 && responseOrder > frameOrder, 'the frame is sent before the tool response, so he can see it');
-
-// ── What he says comes back as both a caption and a voice ───────────────────
-
-const captions = [];
-voice.options.onTranscript = ({ role, text, final }) => captions.push({ role, text, final });
-socket.deliver({ serverContent: { outputTranscription: { text: 'Looking now.' } } });
-socket.deliver({ serverContent: { outputTranscription: { text: ' It is your inbox.', finished: true } } });
-note(captions.some((caption) => caption.text.includes('It is your inbox')), 'his speech becomes a caption bubble');
-
-// ── And a tool that changes nothing about pictures still works ──────────────
-
-socket.deliver({ toolCall: { functionCalls: [{ id: 'fc2', name: 'point_at', args: { target_id: 'W12' } }] } });
-await new Promise((resolve) => setTimeout(resolve, 30));
-note(toolCalls.length === 2 && toolCalls[1].args.target_id === 'W12', 'tool arguments arrive parsed');
-note(socket.events('toolResponse').length === 2, 'the second tool gets its own response');
-
-voice.close();
-
-// ── A model Google has retired must not leave him mute ──────────────────────
-
-let attempts = 0;
-class RetiredModelSocket extends FakeSocket {
-  constructor(url) {
-    super(url);
-    attempts += 1;
-    this.attempt = attempts;
-    this.acknowledges = false;
-  }
-  send(raw) {
-    // Recorded like the real thing, but the first attempt is turned away
-    // before the session is ever acknowledged — a retired model.
-    const payload = JSON.parse(raw);
-    this.sent.push(payload);
-    if (!payload.setup) return;
-    if (this.attempt === 1) setTimeout(() => this.onclose?.({ code: 1007, reason: 'model not found' }), 5);
-    else setTimeout(() => this.deliver({ setupComplete: {} }), 2);
-  }
-}
-
-const socketFor = globalThis.WebSocket;
-globalThis.WebSocket = RetiredModelSocket;
-attempts = 0;
-const socketsBefore = FakeSocket.all.length;
-const retryVoice = new LiveVoice({ onTool: async () => ({ ok: true, text: '' }), onStatus: () => undefined });
-const firstModel = 'gemini-2.0-gone';
-try {
-  await retryVoice.connect({
-    token: 't2',
-    wsUrl: 'wss://example/…',
-    session: { model: firstModel, instructions: 'x', voice: 'Puck', tools: [] },
-    pushToTalk: true,
-    voiceOut: false
+/** Ask the OS for a free TCP port, then let it go so the child can take it. */
+const freePort = () =>
+  new Promise((resolve) => {
+    const probe = createSocket();
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
   });
-} catch {
-  /* if every model fails that is a real error, asserted below */
+
+// ── A fake Ollama, so the test runs anywhere ────────────────────────────────
+
+const seen = [];
+const fakeOllama = createServer((request, response) => {
+  let body = '';
+  request.on('data', (chunk) => (body += chunk));
+  request.on('end', () => {
+    const send = (status, payload) => {
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(payload));
+    };
+    if (request.url.endsWith('/models')) {
+      return send(200, { data: [{ id: 'llama3.2' }] });
+    }
+    if (request.url.endsWith('/chat/completions')) {
+      seen.push(JSON.parse(body || '{}'));
+      return send(200, {
+        choices: [{ message: { role: 'assistant', content: 'Hello from the local model.' } }]
+      });
+    }
+    send(404, { error: 'not found' });
+  });
+});
+
+await new Promise((resolve) => fakeOllama.listen(0, '127.0.0.1', resolve));
+const ollamaPort = fakeOllama.address().port;
+const brainHost = `http://127.0.0.1:${ollamaPort}`;
+
+// ── Boot the real bridge against it ──────────────────────────────────────────
+
+const bridgePort = await freePort();
+const child = spawn(process.execPath, [join(COMPANION, 'server.mjs')], {
+  cwd: COMPANION,
+  env: {
+    ...process.env,
+    BUDDY_NO_TLS: '1', // no certificate needed for a local test
+    BUDDY_PHONE_PORT: String(bridgePort),
+    BUDDY_OLLAMA_HOST: brainHost,
+    BUDDY_MODEL: 'llama3.2'
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+let bridgeLog = '';
+child.stdout.on('data', (chunk) => (bridgeLog += chunk));
+child.stderr.on('data', (chunk) => (bridgeLog += chunk));
+
+const base = `http://127.0.0.1:${bridgePort}`;
+const post = async (path, body) => {
+  const response = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  return { status: response.status, body: await response.json().catch(() => ({})) };
+};
+
+async function waitForBridge() {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      const response = await fetch(`${base}/api/status`);
+      if (response.ok) return await response.json();
+    } catch {
+      /* not up yet */
+    }
+    await sleep(100);
+  }
+  return null;
 }
-const retried = FakeSocket.last; // the newest socket created
-note(attempts >= 2, `a retired model is retried rather than given up on (${attempts} attempts)`);
-const sentModels = FakeSocket.all.slice(socketsBefore)
-  .map((socket) => socket.sent.find((payload) => payload.setup)?.setup?.model)
-  .filter(Boolean);
-note(sentModels[0] === `models/${firstModel}`, `the named model is tried first (${sentModels[0]})`);
-note(sentModels[1] && sentModels[1] !== `models/${firstModel}`, `then a known-good one (${sentModels[1]})`);
-note(retryVoice.connected, 'the session ends up connected');
-note(Boolean(retryVoice.micNode), 'the microphone survived the retry');
-retryVoice.close();
-globalThis.WebSocket = socketFor;
+
+console.log('Buddy voice path — bridge ↔ local model test\n');
+
+const status = await waitForBridge();
+note(Boolean(status), 'the bridge came up');
+note(status?.brain?.ready === true, 'the bridge found his brain');
+note(status?.brain?.model === 'llama3.2', `the model is the one we asked for (${status?.brain?.model})`);
+note(status?.brain?.host === brainHost, 'the model server is the local one');
+
+// ── The session the phone asks for ──────────────────────────────────────────
+
+const session = await post('/api/session', { device: 'test', wants: 'text' });
+note(session.status === 200, `asking for a session works (${session.status})`);
+note(!('live' in session.body) || session.body.live === undefined, 'no live credential is handed out any more');
+note(typeof session.body.instructions === 'string' && session.body.instructions.length > 0, 'he is given instructions');
+note(session.body.brain?.ready === true, 'the session reports the brain as ready');
+note(session.body.settings?.brain?.model === 'llama3.2', 'the settings screen can show the model');
+
+// ── The answer the phone actually shows and speaks ──────────────────────────
+
+const chat = await post('/api/chat', { text: 'Are you awake?', device: 'test' });
+note(chat.status === 200, `chat answers (${chat.status})`);
+note(chat.body.text === 'Hello from the local model.', `the reply comes back verbatim ("${chat.body.text}")`);
+note(chat.body.via === 'bridge', 'the bridge answered it (no Mac connected in this test)');
+
+note(seen.length === 1, `the model was asked exactly once (${seen.length})`);
+const request = seen[0] || {};
+note(request.model === 'llama3.2', 'the request names the model');
+note(Array.isArray(request.messages) && request.messages[0]?.role === 'system', 'his instructions go first');
+note(request.messages?.[1]?.content === 'Are you awake?', 'the words the user said are passed through');
+note(request.stream === false, 'a plain (non-streaming) answer is asked for');
+
+// ── And it says plainly when the brain is missing ───────────────────────────
+
+const lonely = spawn(process.execPath, [join(COMPANION, 'server.mjs')], {
+  cwd: COMPANION,
+  env: {
+    ...process.env,
+    BUDDY_NO_TLS: '1',
+    BUDDY_PHONE_PORT: String(await freePort()),
+    BUDDY_OLLAMA_HOST: 'http://127.0.0.1:1', // nothing lives here
+    BUDDY_MODEL: 'llama3.2'
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+let lonelyLog = '';
+lonely.stdout.on('data', (chunk) => (lonelyLog += chunk));
+lonely.stderr.on('data', (chunk) => (lonelyLog += chunk));
+for (let attempt = 0; attempt < 60 && !/Brain: nothing is answering/.test(lonelyLog); attempt += 1) {
+  await sleep(100);
+}
+note(/Brain: nothing is answering/.test(lonelyLog), 'with no model running, he says so instead of pretending');
+note(/ollama pull llama3\.2/.test(lonelyLog), 'and he tells you exactly what to run');
+lonely.kill('SIGKILL');
+
+note(/Brain: llama3\.2 on http:\/\/127\.0\.0\.1:\d+ — free, open source and unlimited/.test(bridgeLog), 'with a model present, he says his brain is free and unlimited');
+
+child.kill('SIGKILL');
+fakeOllama.close();
 
 console.log(`\n${problems.length === 0 ? 'all good' : `${problems.length} problem(s)`}`);
 for (const problem of problems) console.log(` - ${problem}`);
+
+if (problems.length) console.log(`\n--- bridge log ---\n${bridgeLog}`);
 process.exit(problems.length === 0 ? 0 : 1);

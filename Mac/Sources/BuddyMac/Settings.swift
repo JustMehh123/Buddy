@@ -53,10 +53,24 @@ final class Settings {
         set { defaults.set(newValue.rawValue, forKey: "trail"); onChange?() }
     }
 
-    /// Which of Gemini's voices he speaks with. The phone shows this too.
+    /// Which voice he speaks with. The phone picks from the voices the browser
+    /// already has, so this is just a hint; "System" lets it choose.
     var voice: String {
-        get { defaults.string(forKey: "voice") ?? "Puck" }
+        get { defaults.string(forKey: "voice") ?? "System" }
         set { defaults.set(newValue, forKey: "voice"); onChange?() }
+    }
+
+    /// Where his open-source model server lives. Empty means the default local
+    /// Ollama (http://127.0.0.1:11434).
+    var brainHost: String {
+        get { defaults.string(forKey: "brainHost") ?? "" }
+        set { defaults.set(newValue, forKey: "brainHost"); onChange?() }
+    }
+
+    /// Which model he thinks with. Empty means the default (llama3.2).
+    var brainModel: String {
+        get { defaults.string(forKey: "brainModel") ?? "" }
+        set { defaults.set(newValue, forKey: "brainModel"); onChange?() }
     }
 
     /// The mood picked by hand in the menu.

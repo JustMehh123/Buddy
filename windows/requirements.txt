@@ -1,0 +1,12 @@
+# Buddy for Windows. All free, all `pip install --user` (no admin).
+# Only requests is needed for chat; the rest unlock eyes/hands/text.
+requests>=2.31        # talking to Ollama (the brain)
+mss>=9.0              # screenshots (look_at_screen)
+pillow>=10.0          # screenshot resize/JPEG
+pyautogui>=0.9.54     # click, drag, scroll, type
+
+# Optional:
+# zeroconf>=0.131     # Bonjour advert (_buddy._tcp) so the bridge finds the PC alone
+# pytesseract>=0.3    # text ids (L#/W#) for look_at_screen — also needs the
+#                     # portable Tesseract binary (no install: point
+#                     # pytesseract.pytesseract.tesseract_cmd at it)

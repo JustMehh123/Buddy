@@ -1,17 +1,20 @@
 import Foundation
 
-/// Blueberry colors from the design canvas, as 0xRRGGBB.
+/// Buddy's colours, as 0xRRGGBB. He is a violet blob: a light lavender highlight
+/// down to a deep purple, with a plum nose. The same values are used by the Mac
+/// (his cursor, menu bar and report card) and by the website in `Web/style.css`
+/// and `Web/face.js`, so both halves of him match exactly.
 public enum Palette {
-    public static let berry1: UInt32 = 0xA9BCFF  // light periwinkle
-    public static let berry2: UInt32 = 0x6C86F5
-    public static let berry3: UInt32 = 0x4254D6
-    public static let berry4: UInt32 = 0x2B2F8F  // deep indigo
-    public static let nose: UInt32 = 0x1C1F66
+    public static let violet1: UInt32 = 0xC9B2FF  // light lavender
+    public static let violet2: UInt32 = 0x9A6BFF  // vivid violet
+    public static let violet3: UInt32 = 0x6C3FE0  // deep violet
+    public static let violet4: UInt32 = 0x3A1E78  // dark purple
+    public static let nose: UInt32 = 0x241042      // plum
     public static let ink: UInt32 = 0x17151F
     public static let inkSoft: UInt32 = 0xB9B2CC
-    public static let panel: UInt32 = 0x1E1B29
+    public static let panel: UInt32 = 0x1A1330
 
-    public static let gradient: [UInt32] = [berry1, berry2, berry3, berry4]
+    public static let gradient: [UInt32] = [violet1, violet2, violet3, violet4]
     public static let gradientStops: [Double] = [0, 0.34, 0.68, 1]
 
     public static func rgb(_ hex: UInt32) -> (r: Double, g: Double, b: Double) {

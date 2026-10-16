@@ -40,7 +40,7 @@ enum MeetingNotes {
         let text = """
         # Buddy Notes
 
-        Meeting notes recorded by Buddy (the blueberry on your phone). One folder per listening session, \
+        Meeting notes recorded by Buddy (the little violet companion on your phone). One folder per listening session, \
         named by start time.
 
         In each session folder:
@@ -67,38 +67,18 @@ enum MeetingNotes {
         return (try await turns(audio), folder)
     }
 
-    /// Gemini listens to the recording and hands back speaker-labelled turns.
-    /// If it can't manage that (a very noisy recording, say), the same audio is
-    /// asked for as plain text, so a session always ends up with something.
+    /// A local Whisper model listens to the recording and hands back turns.
+    /// It does not label speakers on its own, so every line starts as "?" and
+    /// consecutive lines are joined into one voice by `join`.
     private static func turns(_ audio: Data) async throws -> [Segment] {
-        do {
-            let rows = try await Gemini.transcribe(audio)
-            let raw = rows.map {
-                Segment(speaker: $0["speaker"] as? String ?? "?",
-                        start: ($0["start"] as? Double) ?? Double($0["start"] as? Int ?? 0),
-                        end: ($0["end"] as? Double) ?? Double($0["end"] as? Int ?? 0),
-                        text: ($0["text"] as? String ?? "").trimmingCharacters(in: .whitespaces))
-            }
-            let joined = join(raw)
-            if !joined.isEmpty { return joined }
-        } catch {
-            NSLog("Buddy: transcription failed (\(error)), trying without speakers")
+        let rows = try await Brain.transcribe(audio)
+        let raw = rows.map {
+            Segment(speaker: $0["speaker"] as? String ?? "?",
+                    start: ($0["start"] as? Double) ?? Double($0["start"] as? Int ?? 0),
+                    end: ($0["end"] as? Double) ?? Double($0["end"] as? Int ?? 0),
+                    text: ($0["text"] as? String ?? "").trimmingCharacters(in: .whitespaces))
         }
-        let json = try await Gemini.generate(
-            model: Gemini.transcribeModel,
-            body: [
-                "contents": [[
-                    "role": "user",
-                    "parts": [
-                        ["text": "Write out everything said in this recording, as one block of plain text. No labels, no timestamps."],
-                        ["inlineData": ["mimeType": "audio/mp4", "data": audio.base64EncodedString()]],
-                    ]
-                ]],
-                "generationConfig": ["temperature": 0.2]
-            ]
-        )
-        let text = (Gemini.text(in: json) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? [] : [Segment(speaker: "?", start: 0, end: 0, text: text)]
+        return join(raw)
     }
 
     /// Joins one speaker's consecutive pieces into a single turn.

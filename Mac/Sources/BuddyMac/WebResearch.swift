@@ -13,10 +13,11 @@ struct ResearchReport {
     }
 }
 
-/// Looks things up on the web with Gemini's Google Search grounding — the free
-/// tier includes it, and it brings the pages it used back with the answer.
+/// Looks things up on the web with a free, key-less search, then lets the local
+/// model write it up. Both halves are open and unlimited, and the pages actually
+/// used come back with the answer.
 enum WebResearch {
-    static let model = Gemini.researchModel
+    static let model = Brain.researchModel
 
     enum ResearchError: LocalizedError {
         case failed(String)
@@ -37,7 +38,7 @@ enum WebResearch {
     static func research(_ question: String, context: String?) async throws -> ResearchReport {
         var input = question
         if let context, !context.isEmpty { input += "\n\nWhat's on the user's screen, for context: \(context)" }
-        let (answer, cited) = try await Gemini.research(input, instructions: instructions)
+        let (answer, cited) = try await Brain.research(input, instructions: instructions)
 
         var text = answer
         var sources: [(String, URL)] = cited

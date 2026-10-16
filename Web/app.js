@@ -2,18 +2,19 @@
  * Buddy on the phone.
  *
  * This page is the whole "phone app": the face, the ears, the chirp and the
- * bubble. It talks to the computer over one websocket (the same newline-JSON
- * packet protocol the original used) and to the voice model through whatever
- * link the computer hands it — so the API key never comes near the phone.
+ * bubble. It talks to the computer through the little bridge server — an event
+ * stream coming down (SSE) and small POSTs going up (/api/send, /api/session,
+ * /api/chat). The ears and mouth are the speech the phone already has
+ * (SpeechRecognition + SpeechSynthesis): free, unlimited, no key. The thinking
+ * happens on the computer, on a free open-source model (Ollama).
  *
- * Gestures, the same as the original:
+ * Gestures:
  *   double tap        wake up / go to sleep
- *   press and hold    ask something
- *   (hold longer)     keep talking; let go and he answers
+ *   press and hold    ask something (browser listens while you hold)
+ *   release           he thinks, then answers in text + spoken voice
  */
 
 import { BuddyFace } from './face.js';
-import { LiveVoice } from './live.js';
 
 const face = new BuddyFace(document.getElementById('face'));
 const els = {
@@ -46,10 +47,8 @@ const state = {
   hostId: null,
   deviceId: getDeviceId(),
   deviceName: deviceLabel(),
-  live: null,
   session: null,
   settings: null,
-  pendingTools: new Map(),
   chirp: true,
   voiceOut: false,
   handsFree: false,
@@ -188,7 +187,7 @@ function send(packet) {
   return state.outbox;
 }
 
-/** Ask the bridge/Mac for a fresh, short-lived voice credential. */
+/** Ask the bridge who he is: his instructions, which model he thinks with, and his settings. */
 async function requestSession() {
   const response = await fetch('./api/session', {
     method: 'POST',
@@ -245,16 +244,7 @@ function handlePacket(packet) {
       /* ignore */
     }
   }
-  if (packet.command === 'stopSpeech') state.live?.interrupt();
-
-  // A tool the model asked for, answered by the Mac.
-  if (packet.command === 'toolResult' && packet.callID) {
-    const pending = state.pendingTools.get(packet.callID);
-    if (pending) {
-      state.pendingTools.delete(packet.callID);
-      pending({ ok: true, text: packet.text || '', image: packet.image || undefined });
-    }
-  }
+  if (packet.command === 'stopSpeech') speechSynthesis?.cancel?.();
 }
 
 /**
@@ -271,8 +261,8 @@ function firstRunGreeting(info = {}) {
   }
   if (info.demo) {
     showBubble("I'm Buddy. This is demo mode — hook up your computer and I can really see your screen and do things.");
-  } else if (info.hasKey === false) {
-    showBubble("I'm Buddy, but I haven't got a voice key yet. Open my menu in your Mac's menu bar and choose “Voice Key (free Gemini)…”.");
+  } else if (info.brain && info.brain.ready === false) {
+    showBubble("I'm Buddy, but I can't find my brain yet. Start Ollama on your computer (ollama serve) with a model pulled.");
   } else {
     showBubble("Hi, I'm Buddy. Hold the screen and talk to me — let go and I'll answer.");
   }
@@ -289,35 +279,6 @@ const mapMood = (mood) =>
     sleepy: 'sleepy'
   })[mood] || 'listening';
 
-/** Forward a tool call to the computer and wait for what it did. */
-function callTool(call) {
-  return new Promise((resolve) => {
-    const callID = call.id || `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    state.pendingTools.set(callID, resolve);
-    send({
-      command: 'tool',
-      callID,
-      tool: call.name,
-      text: JSON.stringify(call.args || {})
-    }).then((sent) => {
-      if (!sent) {
-        state.pendingTools.delete(callID);
-        resolve({ ok: false, error: 'the computer is not connected' });
-      }
-    });
-    // Never leave the model hanging on a tool that never answers.
-    setTimeout(() => {
-      if (state.pendingTools.has(callID)) {
-        state.pendingTools.delete(callID);
-        resolve({ ok: false, error: 'the computer took too long' });
-      }
-    }, 40000);
-
-    if (call.name === 'look_at_screen') face.setMood('thinking');
-    if (call.name === 'point_at' || call.name === 'point_at_spot') face.setMood('pointing');
-  });
-}
-
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 async function wake() {
@@ -328,109 +289,16 @@ async function wake() {
   send({ command: 'awake' });
   setStatus('ready', 'Waking up…');
 
-  try {
-    const session = state.session?.live ? state.session : await requestSession();
-    if (!session.live) {
-      // No realtime provider: the computer can still do everything, but the
-      // talking has to happen on-device.
-      startLocalVoice();
-      return;
-    }
-    await startRealtime(session.live);
-  } catch (error) {
-    face.setMood('error');
-    setStatus('offline', 'No voice yet');
-    showOverlay(
-      'He has no voice yet',
-      `${error.message}. Add a free Gemini key on the computer (aistudio.google.com/apikey) and restart the Buddy app, or use on-device voice below.`,
-      'Use on-device voice',
-      () => startLocalVoice()
-    );
-  }
-}
-
-async function startRealtime(live) {
-  endSession();
-  const voice = new LiveVoice({
-    onStatus: (status, detail) => {
-      if (status === 'ready') {
-        face.setMood(state.handsFree ? 'listening' : 'listening');
-        setStatus('ready', state.handsFree ? 'Listening' : 'Hold the screen to talk');
-      }
-      if (status === 'thinking') setStatus('ready', 'Thinking…');
-      if (status === 'listening') face.setMood('listening');
-      if (status === 'reconnect') {
-        setStatus('connecting', detail || 'Reconnecting…');
-        reconnectSoon();
-      }
-      if (status === 'closed') {
-        setStatus('offline', 'Voice stopped');
-      }
-    },
-    onTranscript: ({ role, text, final }) => {
-      if (role === 'you') {
-        if (!final) showHint(text);
-        else showHint('');
-        if (final) face.setMood('thinking');
-        return;
-      }
-      showBubble(text);
-      face.setMood('talking');
-      send({ command: 'caption', text });
-      if (final) {
-        send({ command: 'captionDone', text });
-        setTimeout(() => {
-          if (!state.holding) face.setMood(state.handsFree ? 'listening' : 'resting');
-        }, Math.min(9000, 1200 + text.split(' ').length * 260));
-      }
-    },
-    onTool: async (call) => {
-      const result = await callTool(call);
-      return result;
-    },
-    onLevel: (level) => {
-      // His mouth follows his own voice, or yours while you talk.
-      if (state.lastWasBuddy) face.setTalk(level * 0.35);
-    },
-    onError: (message) => {
-      setStatus('error', message);
-      face.setMood('error');
-    },
-    onClose: () => {
-      state.live = null;
-      if (state.awake) reconnectSoon();
-    }
-  });
-  try {
-    await voice.connect({
-      token: live.token,
-      wsUrl: live.wsUrl,
-      session: live.session,
-      voiceOut: state.voiceOut,
-      pushToTalk: !state.handsFree,
-      ambient: true
-    });
-    state.live = voice;
-    voice.setVoiceOut(state.voiceOut);
-    if (state.holding) voice.beginHold();
-  } catch (error) {
-    state.live = null;
-    throw error;
-  }
-}
-
-let reconnectTimer = null;
-function reconnectSoon() {
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(async () => {
-    if (!state.awake) return;
+  // His ears and mouth are the speech the phone already has — free, unlimited,
+  // no key. The thinking happens on the computer, on a free open-source model.
+  if (!state.session) {
     try {
-      const session = await requestSession();
-      if (session.live) await startRealtime(session.live);
+      await requestSession();
     } catch {
-      /* the next wake will try again */
+      /* the stream reconnect will try again; voice still works */
     }
-  }, 1200);
+  }
+  startLocalVoice();
 }
 
 function sleep() {
@@ -445,55 +313,80 @@ function sleep() {
 }
 
 function endSession() {
-  clearTimeout(reconnectTimer);
-  state.live?.close();
-  state.live = null;
-  for (const [, resolve] of state.pendingTools) resolve({ ok: false, error: 'session ended' });
-  state.pendingTools.clear();
+  try {
+    speechSynthesis?.cancel?.();
+  } catch {
+    /* nothing speaking */
+  }
 }
 
 /**
- * On-device voice: the browser listens and speaks, and the computer still does
- * the seeing, pointing and doing. Works with no key at all, and it's the
- * fallback when the realtime service can't be reached.
+ * His voice: the phone's own speech. The browser listens while you hold the
+ * screen, the computer thinks, and the browser speaks the answer back. There is
+ * no key and no quota — it comes with Safari and Chrome — and it is the only
+ * voice path now, so there is nothing to fall back from.
  */
 function startLocalVoice() {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
-    showOverlay('On-device voice is not available', 'This browser has no speech recognition. Safari and Chrome do.', 'Close', hideOverlay);
+    showOverlay(
+      'This browser has no speech recognition',
+      'You can still type to him; try Safari or Chrome for voice.',
+      'Close',
+      hideOverlay
+    );
     return;
   }
-  face.setMood('listening');
-  setStatus('ready', 'On-device voice — hold to talk');
+
+  face.setMood(state.handsFree ? 'listening' : 'resting');
+  setStatus('ready', state.handsFree ? 'Listening' : 'Hold the screen to talk');
+
   state.localRecognition ||= new Recognition();
   const recognition = state.localRecognition;
   recognition.continuous = false;
   recognition.interimResults = true;
   recognition.lang = navigator.language || 'en-US';
-  let finalText = '';
+
+  let heard = '';
   recognition.onresult = (event) => {
-    finalText = '';
-    for (let i = 0; i < event.results.length; i += 1) finalText += event.results[i][0].transcript;
-    showHint(finalText);
+    heard = '';
+    for (let i = 0; i < event.results.length; i += 1) heard += event.results[i][0].transcript;
+    showHint(heard);
   };
-  recognition.onerror = () => setStatus('ready', 'Didn\'t catch that');
+  recognition.onerror = () => {
+    showHint('');
+    setStatus('ready', "Didn't catch that");
+  };
   recognition.onend = async () => {
     showHint('');
-    if (!finalText.trim()) {
-      face.setMood('resting');
+    const question = heard.trim();
+    heard = '';
+    if (!question) {
+      face.setMood(state.handsFree ? 'listening' : 'resting');
       return;
     }
-    await askLocally(finalText.trim());
+    await askLocally(question);
   };
+
   state.localWake = () => {
     try {
       recognition.start();
     } catch {
       /* already listening */
     }
+    face.setMood('listening');
+    setStatus('ready', 'Listening…');
   };
+  state.localStop = () => {
+    try {
+      recognition.stop();
+    } catch {
+      /* not listening */
+    }
+  };
+
   // Woken up mid-press: don't make them lift and press again.
-  if (state.holding) state.localWake();
+  if (state.holding || state.handsFree) state.localWake();
 }
 
 async function askLocally(text) {
@@ -547,14 +440,7 @@ function bindGestures() {
 
     if (state.handsFree) return;
     if (!state.awake) wake();
-
-    if (!state.live && state.localWake) {
-      state.localWake();
-      return;
-    }
-    state.live?.beginHold();
-    face.setMood('listening');
-    setStatus('ready', 'Listening…');
+    state.localWake?.();
   };
 
   const up = () => {
@@ -562,7 +448,7 @@ function bindGestures() {
     if (state.handsFree) return;
     const held = Date.now() - holdStarted;
     if (held < 220) return; // too short to be a question
-    state.live?.endHold();
+    state.localStop?.();
     face.setMood('thinking');
   };
 
@@ -587,11 +473,9 @@ function bindGestures() {
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && state.live) state.live.setMuted(true);
-    else state.live?.setMuted(false);
+    // Leaving the page mid-question: stop listening so he isn't overheard.
+    if (document.hidden) state.localStop?.();
   });
-
-  window.addEventListener('beforeunload', () => state.live?.close());
 }
 
 // ── Small UI helpers ────────────────────────────────────────────────────────
@@ -608,13 +492,11 @@ function showHint(text) {
 
 function showBubble(text) {
   if (!text?.trim()) return;
-  state.lastWasBuddy = true;
   els.bubbleText.textContent = text.trim();
   els.bubble.classList.add('visible');
   clearTimeout(state.bubbleTimer);
   state.bubbleTimer = setTimeout(() => {
     els.bubble.classList.remove('visible');
-    state.lastWasBuddy = false;
   }, Math.min(14000, 2600 + text.split(' ').length * 300));
 }
 
@@ -645,13 +527,13 @@ function applySettingsToUi() {
 
 function renderSettings() {
   const settings = state.settings || {};
+  const brain = settings.brain || state.session?.brain || {};
   const rows = [
     ['Computer', state.hostName],
-    ['Voice', settings.voice || 'Puck'],
-    ['Computer use', settings.computerUse === false ? 'off — he can look and point only' : 'on'],
-    ['Memories', `${(settings.memoryCount ?? 0)} saved`],
-    ['Simulate mode', settings.simulated ? 'yes — a pretend screen' : 'no — real screen'],
-    ['Voice session', state.session?.live ? state.session.live.session?.model || 'ready' : 'not connected']
+    ['Voice', 'the phone’s own (free)'],
+    ['Brain', brain.model || state.session?.model || 'local model'],
+    ['Model server', brain.host || 'http://127.0.0.1:11434'],
+    ['Computer use', settings.computerUse === false ? 'off — he can look and point only' : 'on']
   ];
   els.settingsBody.innerHTML = rows
     .map(
@@ -717,13 +599,12 @@ function boot() {
   });
   els.voiceToggle.addEventListener('change', () => {
     state.voiceOut = els.voiceToggle.checked;
-    state.live?.setVoiceOut(state.voiceOut);
     if (!state.voiceOut) speechSynthesis?.cancel?.();
   });
   els.handsFreeToggle.addEventListener('change', () => {
     state.handsFree = els.handsFreeToggle.checked;
-    state.live?.setPushToTalk(!state.handsFree);
     setStatus('ready', state.handsFree ? 'Listening' : 'Hold the screen to talk');
+    if (state.handsFree) state.localWake?.();
   });
 
   // Reconnect faster when the phone comes back to the app.
