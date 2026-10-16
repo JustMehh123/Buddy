@@ -43,12 +43,42 @@ const FORCED_HOST = process.env.BUDDY_HOST || '';
 const FORCED_PORT = process.env.BUDDY_PORT ? Number(process.env.BUDDY_PORT) : 0;
 const CERT_DIR = process.env.BUDDY_CERT_DIR || join(HERE, '.certs');
 
-// Buddy thinks with Ollama — an open-source model server on your own machine.
-// No key, no account, no quota: free, open source and effectively unlimited.
-const BRAIN_HOST = (process.env.BUDDY_OLLAMA_HOST || process.env.OLLAMA_HOST || 'http://127.0.0.1:11434')
-  .replace(/\/+$/, '');
-const BRAIN_MODEL = process.env.BUDDY_MODEL || 'llama3.2';
+// Buddy's brain: local Ollama by default (free, private, no key), or a free
+// cloud brain when a key is set — every option speaks the same
+// OpenAI-compatible /v1/chat/completions shape with tools.
+//
+//   BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... node companion/server.mjs
+//
+// Groq's free tier runs 70B-class models at hundreds of tokens/sec: much
+// smarter and faster than the 3B local default, for one free key.
+const PROVIDERS = {
+  ollama: { base: null, model: 'llama3.2' },
+  groq: { base: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+  gemini: { base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.8-flash' },
+  compatible: { base: process.env.BUDDY_API_BASE || '', model: '' }
+};
+function resolveProvider() {
+  const explicit = (process.env.BUDDY_PROVIDER || '').toLowerCase();
+  if (PROVIDERS[explicit]) return explicit;
+  if (process.env.GROQ_API_KEY) return 'groq';
+  if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) return 'gemini';
+  if (process.env.BUDDY_API_BASE) return 'compatible';
+  return 'ollama';
+}
+const PROVIDER = resolveProvider();
+const BRAIN_HOST = (() => {
+  if (PROVIDER === 'groq' || PROVIDER === 'gemini') return PROVIDERS[PROVIDER].base;
+  if (PROVIDER === 'compatible') return (process.env.BUDDY_API_BASE || '').replace(/\/+$/, '');
+  return (process.env.BUDDY_OLLAMA_HOST || process.env.OLLAMA_HOST || 'http://127.0.0.1:11434')
+    .replace(/\/+$/, '');
+})();
+const BRAIN_MODEL = process.env.BUDDY_MODEL || PROVIDERS[PROVIDER].model;
 const BRAIN_URL = BRAIN_HOST.endsWith('/v1') ? BRAIN_HOST : `${BRAIN_HOST}/v1`;
+const BRAIN_KEY = process.env.BUDDY_API_KEY || process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+const brainHeaders = () => ({
+  'content-type': 'application/json',
+  ...(BRAIN_KEY ? { authorization: `Bearer ${BRAIN_KEY}` } : {})
+});
 
 const log = (...args) => console.log(`\u001b[35mbuddy\u001b[0m`, ...args);
 const warn = (...args) => console.warn(`\u001b[33mbuddy\u001b[0m`, ...args);
@@ -58,17 +88,26 @@ const warn = (...args) => console.warn(`\u001b[33mbuddy\u001b[0m`, ...args);
  * phone can tell "he's thinking" from "Ollama isn't running" in a heartbeat.
  */
 async function brainStatus() {
-  const base = { host: BRAIN_HOST, model: BRAIN_MODEL };
+  const base = { provider: PROVIDER, host: BRAIN_HOST, model: BRAIN_MODEL };
+  if (PROVIDER !== 'ollama' && !BRAIN_KEY) {
+    return { ...base, ready: false, detail: `the ${PROVIDER} brain needs a free API key (set BUDDY_API_KEY)` };
+  }
   try {
-    const response = await fetch(`${BRAIN_URL}/models`, { signal: AbortSignal.timeout(1500) });
+    const response = await fetch(`${BRAIN_URL}/models`, {
+      headers: brainHeaders(),
+      signal: AbortSignal.timeout(PROVIDER === 'ollama' ? 1500 : 8000)
+    });
     if (!response.ok) return { ...base, ready: false, detail: `HTTP ${response.status}` };
     const json = await response.json();
     const models = (json.data || []).map((entry) => entry.id);
     const wanted = BRAIN_MODEL.split(':')[0];
     if (models.length && !models.some((id) => id === BRAIN_MODEL || id.startsWith(wanted))) {
-      return { ...base, ready: false, models, detail: 'that model has not been pulled yet' };
+      if (PROVIDER === 'ollama') {
+        return { ...base, ready: false, models, detail: 'that model has not been pulled yet' };
+      }
+      return { ...base, ready: false, detail: `that model is not offered — check BUDDY_MODEL` };
     }
-    return { ...base, ready: models.length > 0, models };
+    return { ...base, ready: models.length > 0, ...(PROVIDER === 'ollama' ? { models } : {}) };
   } catch (error) {
     return { ...base, ready: false, detail: error.message };
   }
@@ -452,7 +491,7 @@ async function askBrain(text, instructions) {
   try {
     response = await fetch(`${BRAIN_URL}/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: brainHeaders(),
       body: JSON.stringify({
         model: BRAIN_MODEL,
         messages: [
@@ -465,11 +504,20 @@ async function askBrain(text, instructions) {
       signal: AbortSignal.timeout(120000)
     });
   } catch (error) {
+    if (PROVIDER === 'ollama') {
+      throw new Error(
+        `I can't reach the model on your computer (${error.message}). Start it with "ollama serve", then try again.`
+      );
+    }
+    throw new Error(`The ${PROVIDER} cloud brain didn't answer (${error.message}). Check the key and connection.`);
+  }
+  if (!response.ok) {
     throw new Error(
-      `I can't reach the model on your computer (${error.message}). Start it with "ollama serve", then try again.`
+      PROVIDER === 'ollama'
+        ? `The model could not answer (${response.status}). Is Ollama running?`
+        : `The ${PROVIDER} cloud brain refused the request (${response.status}). Check the key and model name.`
     );
   }
-  if (!response.ok) throw new Error(`The model could not answer (${response.status}). Is Ollama running?`);
   const json = await response.json();
   const reply = (json.choices?.[0]?.message?.content || '').trim();
   return reply || "I'm not sure what to say to that.";
@@ -897,12 +945,23 @@ if (!certificates) lines.push('', 'Plain HTTP: the face and buttons work; iPhone
 // Say plainly whether his brain is up, since that is the one moving part now.
 const brainNow = await brainStatus();
 if (brainNow.ready) {
-  lines.push('', `Brain: ${brainNow.model} on ${brainNow.host} — free, open source and unlimited.`);
-} else {
+  lines.push(
+    '',
+    PROVIDER === 'ollama'
+      ? `Brain: ${brainNow.model} on ${brainNow.host} — free, open source and unlimited.`
+      : `Brain: ${brainNow.model} via ${PROVIDER} — free tier, fast cloud brain.`
+  );
+} else if (PROVIDER === 'ollama') {
   lines.push(
     '',
     `Brain: nothing is answering at ${brainNow.host} yet.`,
     `   Install Ollama (ollama.com), run "ollama serve", then "ollama pull ${BRAIN_MODEL}".`
+  );
+} else {
+  lines.push(
+    '',
+    `Brain: nothing is answering at ${brainNow.host} yet.`,
+    `   ${brainNow.detail || `Set BUDDY_API_KEY to a free ${PROVIDER} key and restart.`}`
   );
 }
 

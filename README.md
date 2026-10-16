@@ -108,6 +108,22 @@ speaks the same OpenAI-shaped API as everyone else — set the server in
 **Brain (local model)…**, or edit `Mac/Sources/BuddyMac/Brain.swift`. Nothing
 else changes.
 
+### Want him smarter *and* faster? (free cloud brain)
+
+Local 3B models are honest but dim and slow. [Groq](https://console.groq.com)
+runs 70B-class models (default: `llama-3.3-70b-versatile`) at hundreds of
+tokens per second on a genuinely free tier — one free key, no card:
+
+1. Sign in at [console.groq.com](https://console.groq.com) and create an API key.
+2. Set two variables (Windows: `setx BUDDY_PROVIDER groq` and
+   `setx BUDDY_API_KEY gsk_...`, then reopen the terminal; Mac/Linux: export
+   them), and restart Buddy and the bridge.
+
+That's the whole switch — same tools, same loop, same phone. (`BUDDY_PROVIDER`
+also accepts `gemini` with a free [AI Studio](https://aistudio.google.com/)
+key, or `compatible` with `BUDDY_API_BASE` for LM Studio/vLLM. Just setting
+`GROQ_API_KEY` alone picks Groq.)
+
 ## Troubleshooting
 
 - **"Looking for your computer…"** — the phone server has not found `Buddy.app`.

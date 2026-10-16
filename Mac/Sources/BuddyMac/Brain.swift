@@ -15,22 +15,64 @@ import Foundation
 enum Brain {
     // MARK: Configuration
 
-    /// Where the model server lives. Defaults to a local Ollama.
+    // MARK: Providers
+    //
+    // Local Ollama by default (free, private, no key). Set BUDDY_PROVIDER to
+    // "groq" with a free key for a much smarter, faster cloud brain — every
+    // provider below speaks the same OpenAI-compatible /v1 shape with tools,
+    // so the conversation loop never changes.
+
+    /// ollama (default) | groq | gemini | compatible.
+    static var provider: String {
+        let defaults = UserDefaults.standard.string(forKey: "brainProvider") ?? ""
+        if !defaults.isEmpty { return defaults.lowercased() }
+        let environment = ProcessInfo.processInfo.environment
+        if let explicit = environment["BUDDY_PROVIDER"], !explicit.isEmpty { return explicit.lowercased() }
+        if environment["GROQ_API_KEY"] != nil { return "groq" }
+        if environment["GEMINI_API_KEY"] != nil || environment["GOOGLE_API_KEY"] != nil { return "gemini" }
+        if environment["BUDDY_API_BASE"] != nil { return "compatible" }
+        return "ollama"
+    }
+
+    /// The key for cloud providers (free Groq/Gemini keys). Local Ollama needs none.
+    static var apiKey: String {
+        let defaults = UserDefaults.standard.string(forKey: "brainKey") ?? ""
+        if !defaults.isEmpty { return defaults }
+        let environment = ProcessInfo.processInfo.environment
+        for name in ["BUDDY_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+            if let value = environment[name], !value.isEmpty { return value }
+        }
+        return ""
+    }
+
+    /// Where the model server lives. Local Ollama by default; cloud presets otherwise.
     static var host: String {
         let defaults = UserDefaults.standard.string(forKey: "brainHost") ?? ""
         if !defaults.isEmpty { return normalize(defaults) }
-        let environment = ProcessInfo.processInfo.environment
-        if let custom = environment["BUDDY_OLLAMA_HOST"], !custom.isEmpty { return normalize(custom) }
-        if let ollama = environment["OLLAMA_HOST"], !ollama.isEmpty { return normalize(ollama) }
-        return "http://127.0.0.1:11434"
+        switch provider {
+        case "groq": return "https://api.groq.com/openai/v1"
+        case "gemini": return "https://generativelanguage.googleapis.com/v1beta/openai"
+        case "compatible":
+            if let base = ProcessInfo.processInfo.environment["BUDDY_API_BASE"], !base.isEmpty { return normalize(base) }
+            return "http://127.0.0.1:11434"
+        default:
+            let environment = ProcessInfo.processInfo.environment
+            if let custom = environment["BUDDY_OLLAMA_HOST"], !custom.isEmpty { return normalize(custom) }
+            if let ollama = environment["OLLAMA_HOST"], !ollama.isEmpty { return normalize(ollama) }
+            return "http://127.0.0.1:11434"
+        }
     }
 
-    /// The model he chats and researches with. Any model you have pulled works.
+    /// The model he chats and researches with. Provider default unless overridden.
     static var chatModel: String {
         let defaults = UserDefaults.standard.string(forKey: "brainModel") ?? ""
         if !defaults.isEmpty { return defaults }
         if let custom = ProcessInfo.processInfo.environment["BUDDY_MODEL"], !custom.isEmpty { return custom }
-        return "llama3.2"
+        switch provider {
+        case "groq": return "llama-3.3-70b-versatile"
+        case "gemini": return "gemini-3.8-flash"
+        default: return "llama3.2"
+        }
     }
 
     /// The OpenAI-compatible base URL (Ollama serves it under `/v1`).
@@ -54,7 +96,10 @@ enum Brain {
         var errorDescription: String? {
             switch self {
             case .unreachable(let why):
-                return "I can't reach the model on your computer (\(why)). Check that Ollama is running: `ollama serve`."
+                if provider == "ollama" {
+                    return "I can't reach the model on your computer (\(why)). Check that Ollama is running: `ollama serve`."
+                }
+                return "The \(provider) cloud brain didn't answer (\(why)). Check the key and connection."
             case .failed(let why):
                 return "The model wouldn't answer: \(why.prefix(160))"
             }
@@ -106,13 +151,19 @@ enum Brain {
             let json = try await get(path: "/models")
             let models = ((json["data"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
             guard !models.isEmpty else {
-                return (false, "The model server is running but has no models yet. Pull one: `ollama pull \(chatModel)`.")
+                if provider == "ollama" {
+                    return (false, "The model server is running but has no models yet. Pull one: `ollama pull \(chatModel)`.")
+                }
+                return (true, "Connected to \(provider); asking \(chatModel) directly.")
             }
             let wanted = chatModel.split(separator: ":").first.map(String.init) ?? chatModel
             if models.contains(where: { $0 == chatModel || $0.hasPrefix(wanted) }) {
-                return (true, "Using \(chatModel) on \(host)")
+                return (true, "Using \(chatModel) (\(provider)) via \(host)")
             }
-            return (true, "Running \(models.count) models; \(chatModel) is not pulled yet. `ollama pull \(chatModel)`.")
+            if provider == "ollama" {
+                return (true, "Running \(models.count) models; \(chatModel) is not pulled yet. `ollama pull \(chatModel)`.")
+            }
+            return (false, "The \(provider) brain doesn't list \(chatModel). Check BUDDY_MODEL.")
         } catch {
             return (false, error.localizedDescription)
         }
@@ -256,6 +307,7 @@ enum Brain {
         request.httpMethod = "POST"
         request.timeoutInterval = 300
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(request)
     }
@@ -265,6 +317,7 @@ enum Brain {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 15
+        if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         return try await send(request)
     }
 

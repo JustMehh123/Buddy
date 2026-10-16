@@ -24,6 +24,11 @@ Set BUDDY_HOST=<this-pc>.local (or its IP) and BUDDY_PORT=8737 on the machine
 running the bridge, or run the bridge on this same PC and it will find Buddy
 through Bonjour when the zeroconf package is installed.
 
+Brain providers (all free): local Ollama by default; a free cloud brain when set::
+
+    BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... py buddy.py   # fast 70B cloud
+    BUDDY_PROVIDER=gemini BUDDY_API_KEY=AIza... py buddy.py  # Google cloud
+
 Only the standard library is imported at startup, so `py buddy.py --selftest`
 runs anywhere (including Linux) and checks the protocol, the tool schemas and
 the instructions without touching Windows.
@@ -51,13 +56,55 @@ import urllib.request
 # --------------------------------------------------------------------------
 
 PORT = int(os.environ.get("BUDDY_PORT", "8737"))
-OLLAMA_HOST = (
-    os.environ.get("BUDDY_OLLAMA_HOST")
-    or os.environ.get("OLLAMA_HOST")
-    or "http://127.0.0.1:11434"
-).rstrip("/")
-BRAIN_URL = OLLAMA_HOST if OLLAMA_HOST.endswith("/v1") else OLLAMA_HOST + "/v1"
-MODEL = os.environ.get("BUDDY_MODEL", "llama3.2")
+
+# Brain providers: local Ollama by default; a free cloud brain when set.
+#
+#     BUDDY_PROVIDER=groq BUDDY_API_KEY=gsk_... py buddy.py   # fast 70B cloud
+#
+# Every provider speaks the same OpenAI-compatible /v1/chat/completions shape
+# with tools, so the conversation loop is untouched. Groq's free tier runs
+# 70B-class models at hundreds of tokens/sec — much smarter and faster than
+# the 3B local default, in exchange for one free key from console.groq.com.
+PROVIDERS = {
+    "ollama": {"model": "llama3.2"},
+    "groq": {"base": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
+    "gemini": {"base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-3.8-flash"},
+    "compatible": {"base": None, "model": None},
+}
+
+
+def provider_config(env):
+    """Pick (provider, base_url, model, api_key) from the environment. Pure/testable."""
+    explicit = (env.get("BUDDY_PROVIDER") or "").strip().lower()
+    if explicit in PROVIDERS:
+        provider = explicit
+    elif env.get("GROQ_API_KEY"):
+        provider = "groq"
+    elif env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY"):
+        provider = "gemini"
+    elif env.get("BUDDY_API_BASE"):
+        provider = "compatible"
+    else:
+        provider = "ollama"
+
+    if provider == "ollama":
+        host = (env.get("BUDDY_OLLAMA_HOST") or env.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+        base = host if host.endswith("/v1") else host + "/v1"
+        model = env.get("BUDDY_MODEL") or PROVIDERS["ollama"]["model"]
+        key = ""
+    elif provider == "compatible":
+        base = (env.get("BUDDY_API_BASE") or "").rstrip("/")
+        model = env.get("BUDDY_MODEL") or ""
+        key = env.get("BUDDY_API_KEY") or ""
+    else:
+        base = PROVIDERS[provider]["base"]
+        model = env.get("BUDDY_MODEL") or PROVIDERS[provider]["model"]
+        key = env.get("BUDDY_API_KEY") or env.get("GROQ_API_KEY", "") or env.get("GEMINI_API_KEY", "") or env.get("GOOGLE_API_KEY", "")
+    return provider, base, model, key
+
+
+PROVIDER, BRAIN_URL, MODEL, BRAIN_KEY = provider_config(os.environ)
+OLLAMA_HOST = (os.environ.get("BUDDY_OLLAMA_HOST") or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
 DEVICE_NAME = os.environ.get("BUDDY_NAME", "") or socket.gethostname()
 SERVICE_TYPE = "_buddy._tcp"
 
@@ -305,8 +352,11 @@ def decode_packets(buffer):
 
 def _http_json(url, payload=None, timeout=120):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    if BRAIN_KEY:
+        headers["Authorization"] = "Bearer " + BRAIN_KEY
     request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST" if data else "GET"
+        url, data=data, headers=headers, method="POST" if data else "GET"
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
@@ -325,8 +375,12 @@ def brain_chat(messages, tools=None, model=None, temperature=0.8):
     try:
         status, payload = _http_json(BRAIN_URL + "/chat/completions", body, timeout=300)
     except Exception as error:
+        if PROVIDER == "ollama":
+            raise RuntimeError(
+                "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
+            )
         raise RuntimeError(
-            "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
+            "The %s cloud brain didn't answer (%s). Check BUDDY_API_KEY and your connection." % (PROVIDER, error)
         )
     if status < 200 or status >= 300:
         message = ""
@@ -353,17 +407,25 @@ def _message_text(content):
 
 
 def brain_health():
+    if PROVIDER != "ollama" and not BRAIN_KEY:
+        return False, "The %s cloud brain needs a free API key first (set BUDDY_API_KEY)." % PROVIDER
     try:
         status, payload = _http_json(BRAIN_URL + "/models", timeout=15)
         models = [entry.get("id", "") for entry in payload.get("data", [])]
         if not models:
-            return False, "The model server is running but has no models yet. Pull one: `ollama pull %s`." % MODEL
+            if PROVIDER == "ollama":
+                return False, "The model server is running but has no models yet. Pull one: `ollama pull %s`." % MODEL
+            return True, "Connected to %s; asking %s directly." % (PROVIDER, MODEL)
         wanted = MODEL.split(":")[0]
         if any(m == MODEL or m.startswith(wanted) for m in models):
-            return True, "Using %s on %s" % (MODEL, OLLAMA_HOST)
-        return True, "Running %d models; %s is not pulled yet. `ollama pull %s`." % (len(models), MODEL, MODEL)
+            return True, "Using %s (%s) via %s" % (MODEL, PROVIDER, BRAIN_URL)
+        if PROVIDER == "ollama":
+            return True, "Running %d models; %s is not pulled yet. `ollama pull %s`." % (len(models), MODEL, MODEL)
+        return False, "The %s brain doesn't list %s. Check BUDDY_MODEL." % (PROVIDER, MODEL)
     except Exception as error:
-        return False, "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
+        if PROVIDER == "ollama":
+            return False, "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
+        return False, "The %s cloud brain didn't answer (%s). Check the key and connection." % (PROVIDER, error)
 
 
 # --------------------------------------------------------------------------
@@ -947,7 +1009,7 @@ def handle_packet(packet, send):
                 "voice": "System",
                 "model": MODEL,
                 "temperature": 0.9,
-                "brain": {"host": OLLAMA_HOST, "model": MODEL},
+                "brain": {"host": BRAIN_URL, "model": MODEL, "provider": PROVIDER},
                 "detail": detail,
                 "ready": ok,
             }),
@@ -1154,6 +1216,19 @@ def selftest():
     # Unknown tools fail in words, never exceptions (the model reads the text).
     text, _ = run_tool("nope_not_a_tool", "{}")
     check(text.startswith("Unknown tool"), "unknown tools answer in words")
+
+    # Provider switching is pure config: defaults stay local, keys pick cloud.
+    provider, base, model, key = provider_config({})
+    check((provider, model, key) == ("ollama", "llama3.2", ""), "no keys means local Ollama")
+    check(base == "http://127.0.0.1:11434/v1", "Ollama base URL shape")
+    provider, base, model, key = provider_config({"BUDDY_PROVIDER": "groq", "BUDDY_API_KEY": "gsk-test"})
+    check(provider == "groq" and base == "https://api.groq.com/openai/v1" and key == "gsk-test",
+          "Groq preset resolves with key")
+    check(model == "llama-3.3-70b-versatile", "Groq default is the 70B model")
+    provider, _, _, _ = provider_config({"GROQ_API_KEY": "gsk-test"})
+    check(provider == "groq", "a Groq key alone picks Groq")
+    provider, _, _, _ = provider_config({"GEMINI_API_KEY": "AIza-test"})
+    check(provider == "gemini", "a Gemini key alone picks Gemini")
 
     # Spot resolution without a snapshot falls back to screen middle, not a crash.
     _state["snapshot"] = None
