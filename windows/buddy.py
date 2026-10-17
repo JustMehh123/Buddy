@@ -381,7 +381,7 @@ def brain_chat(messages, tools=None, model=None, temperature=0.8):
                 "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
             )
         raise RuntimeError(
-            "The %s cloud brain didn't answer (%s). Check BUDDY_API_KEY and your connection." % (PROVIDER, error)
+            "The %s cloud brain didn't answer (%s). Check BUDDY_API_KEY and your connection." % (PROVIDER, _http_error_detail(error))
         )
     if status < 200 or status >= 300:
         message = ""
@@ -407,6 +407,23 @@ def _message_text(content):
     return ""
 
 
+def _http_error_detail(error):
+    """Short human text for an HTTP failure, server's own reason included.
+
+    Cloud brains (Groq/Gemini) put the real cause — a bad key, a model the
+    project may not use, a cap — in the JSON error body. The bare status
+    ("HTTP Error 403") hides it, so dig it out when it's there."""
+    try:
+        raw = error.read().decode("utf-8", "replace")
+        parsed = json.loads(raw).get("error", {}) or {}
+        body = parsed.get("message", "") or parsed.get("code", "") or raw[:160]
+    except Exception:
+        body = ""
+    status = getattr(error, "code", "") or getattr(error, "status", "")
+    text = ("%s %s" % (status, body)).strip()
+    return text or str(error)[:160]
+
+
 def brain_health():
     if PROVIDER != "ollama" and not BRAIN_KEY:
         return False, "The %s cloud brain needs a free API key first (set BUDDY_API_KEY)." % PROVIDER
@@ -426,7 +443,7 @@ def brain_health():
     except Exception as error:
         if PROVIDER == "ollama":
             return False, "I can't reach the model on your computer (%s). Check that Ollama is running: `ollama serve`." % error
-        return False, "The %s cloud brain didn't answer (%s). Check the key and connection." % (PROVIDER, error)
+        return False, "The %s cloud brain refused (%s). Check the key, that project's model access, and the connection." % (PROVIDER, _http_error_detail(error))
 
 
 # --------------------------------------------------------------------------
@@ -1233,6 +1250,15 @@ def selftest():
     check(provider == "groq", "a Groq key alone picks Groq")
     provider, _, _, _ = provider_config({"GEMINI_API_KEY": "AIza-test"})
     check(provider == "gemini", "a Gemini key alone picks Gemini")
+
+    # Cloud refusals surface the server's own reason, not just the status.
+    class FakeHTTPError(Exception):
+        code = 403
+        def read(self):
+            return b'{"error": {"message": "Model is blocked", "code": "model_permission_blocked_project"}}'
+    detail = _http_error_detail(FakeHTTPError())
+    check("403" in detail and "blocked" in detail, "refusal detail keeps status + server reason")
+    check(_http_error_detail(ValueError("boom")) == "boom", "plain errors pass through")
 
     # Spot resolution without a snapshot falls back to screen middle, not a crash.
     _state["snapshot"] = None
